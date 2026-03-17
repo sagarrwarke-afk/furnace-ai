@@ -5,6 +5,16 @@ import type {
   FleetOverview,
   OptimizeRequest,
   OptimizeResponse,
+  FurnaceDetail,
+  WhatIfRequest,
+  WhatIfResponse,
+  SensitivityListResponse,
+  SensitivityUpdateRequest,
+  TrainModelResponse,
+  ModelListResponse,
+  ActivateModelResponse,
+  EconomicParamsResponse,
+  ConstraintsResponse,
 } from '../types'
 
 const api = axios.create({
@@ -64,4 +74,80 @@ export async function downloadOptResult(runId: number): Promise<void> {
   a.download = `optimizer_run_${runId}.xlsx`
   a.click()
   window.URL.revokeObjectURL(url)
+}
+
+// ── Furnace Detail ────────────────────────────────────────────────────────────
+
+export async function getFurnaceDetail(furnaceId: string, uploadId = 'latest'): Promise<FurnaceDetail> {
+  const res = await api.get<FurnaceDetail>(`/api/furnace/${furnaceId}`, {
+    params: { upload_id: uploadId },
+  })
+  return res.data
+}
+
+// ── What-If ───────────────────────────────────────────────────────────────────
+
+export async function runWhatIf(req: WhatIfRequest): Promise<WhatIfResponse> {
+  const res = await api.post<WhatIfResponse>('/api/whatif', req)
+  return res.data
+}
+
+// ── Sensitivity ───────────────────────────────────────────────────────────────
+
+export async function getSensitivities(): Promise<SensitivityListResponse> {
+  const res = await api.get<SensitivityListResponse>('/api/sensitivity')
+  return res.data
+}
+
+export async function updateSensitivity(req: SensitivityUpdateRequest): Promise<void> {
+  await api.put('/api/sensitivity', req)
+}
+
+// ── Training & Models ─────────────────────────────────────────────────────────
+
+export async function trainModel(
+  file: File,
+  technology: string,
+  feedType: string,
+): Promise<TrainModelResponse> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('technology', technology)
+  form.append('feed_type', feedType)
+  const res = await api.post<TrainModelResponse>('/api/train-model', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return res.data
+}
+
+export async function listModels(): Promise<ModelListResponse> {
+  const res = await api.get<ModelListResponse>('/api/models')
+  return res.data
+}
+
+export async function activateModel(modelId: number): Promise<ActivateModelResponse> {
+  const res = await api.put<ActivateModelResponse>(`/api/models/${modelId}/activate`)
+  return res.data
+}
+
+// ── Config ────────────────────────────────────────────────────────────────────
+
+export async function getEconomics(): Promise<EconomicParamsResponse> {
+  const res = await api.get<EconomicParamsResponse>('/api/config/economics')
+  return res.data
+}
+
+export async function updateEconomics(params: { param_name: string; value: number }[]): Promise<EconomicParamsResponse> {
+  const res = await api.put<EconomicParamsResponse>('/api/config/economics', { params })
+  return res.data
+}
+
+export async function getConstraints(): Promise<ConstraintsResponse> {
+  const res = await api.get<ConstraintsResponse>('/api/config/constraints')
+  return res.data
+}
+
+export async function updateConstraints(constraints: { constraint_name: string; limit_value: number }[]): Promise<ConstraintsResponse> {
+  const res = await api.put<ConstraintsResponse>('/api/config/constraints', { constraints })
+  return res.data
 }
