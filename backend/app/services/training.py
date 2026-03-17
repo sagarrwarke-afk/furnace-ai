@@ -99,6 +99,49 @@ def _extract_sensitivities(
     return sensitivities
 
 
+def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Accept both the dedicated training CSV format AND the standard operating
+    data upload template, renaming columns as needed so the engine always
+    receives the canonical feature names.
+
+    Upload template → canonical mapping:
+      feed_rate  → feed
+      tmt_max    → tmt       (also used as target)
+      yield      → yield_c2h4  (the engine target name)
+      coke_thickness_1..8 → thickness (mean of available columns)
+    """
+    df = df.copy()
+
+    col_map = {
+        "feed_rate": "feed",
+        "tmt_max": "tmt",
+    }
+    for src, dst in col_map.items():
+        if src in df.columns and dst not in df.columns:
+            df.rename(columns={src: dst}, inplace=True)
+
+    # yield → yield_c2h4 (engine target name)
+    if "yield" in df.columns and "yield_c2h4" not in df.columns:
+        df.rename(columns={"yield": "yield_c2h4"}, inplace=True)
+
+    # Compute thickness as mean of coke_thickness_N columns
+    if "thickness" not in df.columns:
+        thick_cols = [c for c in df.columns if c.startswith("coke_thickness_")]
+        if thick_cols:
+            df["thickness"] = df[thick_cols].mean(axis=1)
+
+    # Drop non-numeric / metadata columns that would confuse the model builder
+    drop_cols = [
+        "timestamp", "furnace_id", "status",
+        "feed_valve_pct", "fgv_pct", "damper_pct",
+        "run_days_elapsed", "run_days_total", "sec",
+    ]
+    df.drop(columns=[c for c in drop_cols if c in df.columns], inplace=True)
+
+    return df
+
+
 def train_model(
     db: Session,
     csv_bytes: bytes,
@@ -111,6 +154,16 @@ def train_model(
     """
     df = pd.read_csv(io.BytesIO(csv_bytes))
 
+    # Accept upload-template column aliases so users can train directly
+    # from their operating data CSV without reformatting
+    df = _normalise_columns(df)
+
+    if len(df) < 50:
+        raise ValueError(
+            f"CSV has only {len(df)} data rows — need at least 50 rows to train. "
+            "Upload multiple snapshots or historical operating data."
+        )
+
     model_name = f"{technology}-{feed_type}"
     model_set = FurnaceSoftSensorModels(
         name=model_name,
@@ -118,10 +171,13 @@ def train_model(
         max_depth=5,
         learning_rate=0.1,
     )
-    model_set.build(df, features=INDEPENDENT_VARS, targets=TARGET_VARS)
+    try:
+        model_set.build(df, features=INDEPENDENT_VARS, targets=TARGET_VARS)
+    except Exception as e:
+        raise ValueError(f"Model training failed: {e}. Check that the CSV has numeric data in all feature columns.")
 
     if not model_set.models:
-        raise ValueError("No targets had sufficient data to train (need >100 non-null rows per feature, >50 per target)")
+        raise ValueError("No targets had sufficient data to train (need >50 rows per target).")
 
     # Pickle entire model_set (models + scaler) as one blob
     blob = pickle.dumps({"models": model_set.models, "scalers": model_set.scalers, "feature_names": model_set.feature_names})
