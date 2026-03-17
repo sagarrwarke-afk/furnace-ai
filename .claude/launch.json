@@ -6,11 +6,12 @@
       "runtimeExecutable": "C:/Program Files/nodejs/node.exe",
       "runtimeArgs": [
         "frontend/node_modules/vite/bin/vite.js",
-        "frontend",
-        "--port", "5173",
+        "preview",
+        "--outDir", "frontend/dist",
         "--host"
       ],
-      "port": 5173
+      "port": 4173,
+      "autoPort": true
     }
   ]
 }

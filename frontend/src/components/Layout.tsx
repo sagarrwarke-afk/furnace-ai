@@ -4,7 +4,11 @@ import Sidebar from './Sidebar'
 const pageTitles: Record<string, string> = {
   '/upload': 'Data Upload',
   '/fleet': 'Fleet Overview',
+  '/furnace': 'Furnace Detail',
+  '/whatif': 'What-If Simulator',
   '/planning': 'Feed Planning & Optimization',
+  '/sensitivity': 'Sensitivity Manager',
+  '/settings': 'Settings',
 }
 
 export default function Layout() {
