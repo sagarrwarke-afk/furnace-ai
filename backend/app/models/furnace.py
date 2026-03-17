@@ -1,11 +1,16 @@
 from sqlalchemy import (
-    Column, Integer, String, Numeric, Boolean, Text, DateTime, ForeignKey,
+    Column, Integer, String, Numeric, Boolean, Text, DateTime, LargeBinary,
+    ForeignKey, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 
 from app.database import Base
 
+
+# =============================================================================
+# INPUT TABLES (from Excel upload)
+# =============================================================================
 
 class UploadHistory(Base):
     __tablename__ = "upload_history"
@@ -56,6 +61,35 @@ class FurnaceSnapshot(Base):
     coke_thickness_8 = Column(Numeric(6, 3))
 
 
+class DownstreamStatus(Base):
+    __tablename__ = "downstream_status"
+
+    id = Column(Integer, primary_key=True)
+    upload_id = Column(Integer, ForeignKey("upload_history.id", ondelete="CASCADE"), nullable=False)
+    snapshot_ts = Column(DateTime(timezone=True), nullable=False)
+    c2_splitter_load_pct = Column(Numeric(5, 2))
+    cgc_suction_bar = Column(Numeric(5, 3))
+    cgc_power_mw = Column(Numeric(8, 2))
+    cgc_vhp_steam_tph = Column(Numeric(8, 3))
+
+
+class FeedComposition(Base):
+    __tablename__ = "feed_composition"
+
+    id = Column(Integer, primary_key=True)
+    upload_id = Column(Integer, ForeignKey("upload_history.id", ondelete="CASCADE"), nullable=False)
+    snapshot_ts = Column(DateTime(timezone=True), nullable=False)
+    furnace_id = Column(String(10), nullable=False)
+    ethane_pct = Column(Numeric(6, 3))
+    propane_pct = Column(Numeric(6, 3))
+    butane_pct = Column(Numeric(6, 3))
+    other_pct = Column(Numeric(6, 3))
+
+
+# =============================================================================
+# CONFIG TABLES (editable from UI)
+# =============================================================================
+
 class FurnaceConfig(Base):
     __tablename__ = "furnace_config"
 
@@ -76,6 +110,9 @@ class FurnaceConfig(Base):
 
 class SensitivityConfig(Base):
     __tablename__ = "sensitivity_config"
+    __table_args__ = (
+        UniqueConstraint("technology", "feed_type", "parameter", "sensitivity_type"),
+    )
 
     id = Column(Integer, primary_key=True)
     technology = Column(String(30), nullable=False)
@@ -110,26 +147,36 @@ class ConstraintLimit(Base):
 
 class CrossFeedConfig(Base):
     __tablename__ = "cross_feed_config"
+    __table_args__ = (UniqueConstraint("source_type"),)
 
     id = Column(Integer, primary_key=True)
-    source_type = Column(String(20), nullable=False, unique=True)
+    source_type = Column(String(20), nullable=False)
     ethane_frac = Column(Numeric(5, 3), nullable=False)
     propane_frac = Column(Numeric(5, 3), nullable=False)
     other_frac = Column(Numeric(5, 3), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
-class DownstreamStatus(Base):
-    __tablename__ = "downstream_status"
+class ModelRegistry(Base):
+    __tablename__ = "model_registry"
 
     id = Column(Integer, primary_key=True)
-    upload_id = Column(Integer, ForeignKey("upload_history.id", ondelete="CASCADE"), nullable=False)
-    snapshot_ts = Column(DateTime(timezone=True), nullable=False)
-    c2_splitter_load_pct = Column(Numeric(5, 2))
-    cgc_suction_bar = Column(Numeric(5, 3))
-    cgc_power_mw = Column(Numeric(8, 2))
-    cgc_vhp_steam_tph = Column(Numeric(8, 3))
+    model_name = Column(String(100), nullable=False)
+    technology = Column(String(30), nullable=False)
+    feed_type = Column(String(20), nullable=False)
+    target = Column(String(50), nullable=False)
+    algorithm = Column(String(50), default="GradientBoostingRegressor")
+    hyperparams = Column(JSONB)
+    metrics = Column(JSONB)
+    model_blob = Column(LargeBinary)
+    active = Column(Boolean, default=False)
+    trained_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
+# =============================================================================
+# OUTPUT TABLES
+# =============================================================================
 
 class OptimizerResult(Base):
     __tablename__ = "optimizer_results"
@@ -145,3 +192,44 @@ class OptimizerResult(Base):
     fleet_totals = Column(JSONB, nullable=False)
     config_used = Column(JSONB)
     notes = Column(Text)
+
+
+class SoftSensorPrediction(Base):
+    __tablename__ = "soft_sensor_predictions"
+
+    id = Column(Integer, primary_key=True)
+    model_id = Column(Integer, ForeignKey("model_registry.id"))
+    upload_id = Column(Integer, ForeignKey("upload_history.id"))
+    furnace_id = Column(String(10), nullable=False)
+    predicted_at = Column(DateTime(timezone=True), server_default=func.now())
+    target = Column(String(50), nullable=False)
+    predicted_value = Column(Numeric(10, 4))
+    actual_value = Column(Numeric(10, 4))
+    residual = Column(Numeric(10, 4))
+
+
+class RunlengthForecast(Base):
+    __tablename__ = "runlength_forecast"
+
+    id = Column(Integer, primary_key=True)
+    furnace_id = Column(String(10), nullable=False)
+    forecast_date = Column(DateTime, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    day_number = Column(Integer, nullable=False)
+    projected_tmt = Column(Numeric(6, 1))
+    projected_coke = Column(Numeric(6, 3))
+    projected_yield = Column(Numeric(5, 2))
+    remaining_days = Column(Integer)
+    confidence = Column(Numeric(4, 2))
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+
+    id = Column(Integer, primary_key=True)
+    action = Column(String(100), nullable=False)
+    entity_type = Column(String(50))
+    entity_id = Column(String(50))
+    user_name = Column(String(100), default="system")
+    details = Column(JSONB)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
