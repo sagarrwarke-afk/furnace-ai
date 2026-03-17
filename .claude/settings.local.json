@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PGPASSWORD='Swa@2026' psql -h localhost -p 5432 -U postgres -d furnace_ai -f D:/furnace-ai/init.sql)",
+      "Bash(PGPASSWORD='Swa@2026' \"/c/Program Files/PostgreSQL/17/bin/psql.exe\" -h localhost -p 5432 -U postgres -d furnace_ai -f \"D:/furnace-ai/init.sql\")",
+      "Bash(PGPASSWORD='Swa@2026' \"/c/Program Files/PostgreSQL/17/bin/psql.exe\" -h localhost -p 5432 -U postgres -d furnace_ai -c \":*)",
+      "Bash(git config --global --add safe.directory D:/furnace-ai)",
+      "Bash(gh auth status)"
+    ]
+  }
+}
