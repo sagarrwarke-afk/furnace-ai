@@ -112,6 +112,16 @@ export default function FurnaceDetailPage() {
         {data && (
           <span className="text-[#4A4A4A] text-xs">{data.technology} · {data.feed_type}</span>
         )}
+        {data && data.prediction_source === 'model' && (
+          <span className="text-xs text-[#00B4CC] bg-[#00B4CC]/10 px-2 py-0.5 rounded" title="Soft sensor values are model-predicted">
+            Predicted by: {data.algorithm ?? 'ML Model'}
+          </span>
+        )}
+        {data && data.prediction_source === 'measured' && (
+          <span className="text-xs text-[#9E9E9E] bg-[#234060] px-2 py-0.5 rounded" title="Soft sensor values from uploaded data">
+            Source: Measured
+          </span>
+        )}
       </div>
 
       {isLoading && (
@@ -137,28 +147,47 @@ export default function FurnaceDetailPage() {
             <div className="bg-[#001730] border border-[#234060] rounded-lg p-5">
               <h2 className="text-[#D4D4D4] font-semibold text-sm mb-4">Key Metrics</h2>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                {[
-                  { label: 'Feed Rate', value: f(data.feed_rate, 1), unit: 't/hr' },
-                  { label: 'COT', value: f(data.cot, 1), unit: '°C' },
-                  { label: 'SHC', value: f(data.shc, 3), unit: '' },
-                  { label: 'Yield', value: f(data.yield, 2), unit: '%' },
-                  { label: 'Conversion', value: f(data.conversion, 1), unit: '%' },
-                  { label: 'Propylene', value: f(data.propylene, 2), unit: '%' },
-                  { label: 'TMT Max', value: f(data.tmt_max, 0), unit: '°C' },
-                  { label: 'Run Days', value: f(data.run_days_elapsed, 0), unit: 'd elapsed' },
-                  { label: 'Coking Rate', value: f(data.coking_rate, 3), unit: '' },
-                  { label: 'COP', value: f(data.cop, 3), unit: 'barg' },
-                  { label: 'CIT', value: f(data.cit, 1), unit: '°C' },
-                  { label: 'SEC', value: f(data.sec, 3), unit: 'GJ/t' },
-                ].map(({ label, value, unit }) => (
-                  <div key={label} className="bg-[#1A2B3C] rounded p-3">
-                    <div className="text-[#9E9E9E] text-xs mb-1">{label}</div>
-                    <div className="text-[#D4D4D4] font-mono text-sm">
-                      {value}
-                      {unit && <span className="text-[#4A4A4A] ml-1 text-xs">{unit}</span>}
+                {(() => {
+                  const isModel = data.prediction_source === 'model'
+                  const metrics: { label: string; value: string; unit: string; measured?: string | null }[] = [
+                    { label: 'Feed Rate', value: f(data.feed_rate, 1), unit: 't/hr' },
+                    { label: 'COT', value: f(data.cot, 1), unit: '°C' },
+                    { label: 'SHC', value: f(data.shc, 3), unit: '' },
+                    { label: 'Yield', value: f(data.yield, 2), unit: '%',
+                      measured: isModel ? f(data.measured_yield, 2) : null },
+                    { label: 'Conversion', value: f(data.conversion, 1), unit: '%',
+                      measured: isModel ? f(data.measured_conversion, 1) : null },
+                    { label: 'Propylene', value: f(data.propylene, 2), unit: '%',
+                      measured: isModel ? f(data.measured_propylene, 2) : null },
+                    { label: 'TMT Max', value: f(data.tmt_max, 0), unit: '°C',
+                      measured: isModel ? f(data.measured_tmt_max, 0) : null },
+                    { label: 'Run Days', value: f(data.run_days_elapsed, 0), unit: 'd elapsed' },
+                    { label: 'Coking Rate', value: f(data.coking_rate, 3), unit: '',
+                      measured: isModel ? f(data.measured_coking_rate, 3) : null },
+                    { label: 'COP', value: f(data.cop, 3), unit: 'barg' },
+                    { label: 'CIT', value: f(data.cit, 1), unit: '°C' },
+                    { label: 'SEC', value: f(data.sec, 3), unit: 'GJ/t' },
+                  ]
+                  return metrics.map(({ label, value, unit, measured }) => (
+                    <div key={label} className="bg-[#1A2B3C] rounded p-3">
+                      <div className="text-[#9E9E9E] text-xs mb-1">
+                        {label}
+                        {measured != null && (
+                          <span className="ml-1 text-[#00B4CC]" title="Model-predicted value">*</span>
+                        )}
+                      </div>
+                      <div className="text-[#D4D4D4] font-mono text-sm">
+                        {value}
+                        {unit && <span className="text-[#4A4A4A] ml-1 text-xs">{unit}</span>}
+                      </div>
+                      {measured != null && (
+                        <div className="text-[#4A4A4A] text-[10px] mt-0.5">
+                          Measured: {measured}{unit ? ` ${unit}` : ''}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  ))
+                })()}
               </div>
             </div>
 
@@ -231,6 +260,40 @@ export default function FurnaceDetailPage() {
               </div>
             )}
           </div>
+
+          {/* Per-coil model predictions */}
+          {data.per_coil_predictions && data.per_coil_predictions.length > 0 && (
+            <div className="xl:col-span-3 bg-[#001730] border border-[#234060] rounded-lg p-5">
+              <h2 className="text-[#D4D4D4] font-semibold text-sm mb-1">Per-Coil Model Predictions</h2>
+              <p className="text-[#4A4A4A] text-xs mb-4">Predicted by {data.algorithm ?? 'ML Model'} — TMT = MAX(coils), Yield = AVG(coils)</p>
+              <div className="overflow-x-auto">
+                <table className="text-xs min-w-full">
+                  <thead>
+                    <tr className="bg-[#1A2B3C]">
+                      {['Coil', 'Thickness (mm)', 'TMT (°C)', 'Yield (%)', 'Conv (%)', 'Propylene (%)', 'Coking Rate'].map(h => (
+                        <th key={h} className="px-3 py-2 text-[#9E9E9E] whitespace-nowrap text-right first:text-left">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.per_coil_predictions.map((coil, i) => (
+                      <tr key={coil.coil} className={i % 2 === 0 ? 'bg-[#001E35]' : 'bg-[#1A2B3C]'}>
+                        <td className="px-3 py-2 text-[#D4D4D4]">C{coil.coil}</td>
+                        <td className="px-3 py-2 text-right text-[#D4D4D4] font-mono">{f(coil.thickness, 2)}</td>
+                        <td className={`px-3 py-2 text-right font-mono ${(coil.tmt ?? 0) > 1060 ? 'text-[#E30613]' : (coil.tmt ?? 0) > 1045 ? 'text-[#F5C800]' : 'text-[#D4D4D4]'}`}>
+                          {f(coil.tmt ?? null, 1)}
+                        </td>
+                        <td className="px-3 py-2 text-right text-[#D4D4D4] font-mono">{f(coil.yield_c2h4 ?? null, 2)}</td>
+                        <td className="px-3 py-2 text-right text-[#D4D4D4] font-mono">{f(coil.conversion ?? null, 2)}</td>
+                        <td className="px-3 py-2 text-right text-[#D4D4D4] font-mono">{f(coil.propylene ?? null, 2)}</td>
+                        <td className="px-3 py-2 text-right text-[#D4D4D4] font-mono">{f(coil.coking_rate ?? null, 3)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
