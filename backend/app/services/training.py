@@ -519,6 +519,18 @@ def _coil_data_or_legacy(
 # Predict fleet values (model-calculated actuals)
 # ---------------------------------------------------------------------------
 
+
+def _get_coking_factor(db: Session, technology: str, feed_type: str) -> float:
+    """Load coking factor from sensitivity_config table for thickness evolution."""
+    row = db.query(SensitivityConfig).filter(
+        SensitivityConfig.technology == technology,
+        SensitivityConfig.feed_type == feed_type,
+        SensitivityConfig.parameter == "coking_factor",
+        SensitivityConfig.sensitivity_type == "thickness_evolution",
+    ).first()
+    return float(row.value) if row else 1.0
+
+
 def predict_fleet_values(
     db: Session,
     snapshots: list,
@@ -559,6 +571,7 @@ def predict_fleet_values(
 
         # Load per-coil data (or build from legacy snapshot)
         coil_data, delta_hours = _coil_data_or_legacy(db, s.upload_id, s, num_coils)
+        coking_factor = _get_coking_factor(db, tech, feed_type)
 
         try:
             pred = ModelBenchmark.predict_furnace(
@@ -567,6 +580,7 @@ def predict_fleet_values(
                 feed_ethane_pct=float(s.feed_ethane_pct or 0),
                 feed_propane_pct=float(s.feed_propane_pct or 0),
                 delta_hours=delta_hours,
+                coking_factor=coking_factor,
             )
             # Remove per_coil detail for fleet-level response
             pred_summary = {k: v for k, v in pred.items() if k not in ("per_coil", "computed_thicknesses")}
@@ -611,6 +625,7 @@ def predict_single_furnace(
 
     # Load per-coil data (or build from legacy snapshot)
     coil_data, delta_hours = _coil_data_or_legacy(db, snap.upload_id, snap, num_coils)
+    coking_factor = _get_coking_factor(db, tech, feed_type)
 
     try:
         pred = ModelBenchmark.predict_furnace(
@@ -619,6 +634,7 @@ def predict_single_furnace(
             feed_ethane_pct=float(snap.feed_ethane_pct or 0),
             feed_propane_pct=float(snap.feed_propane_pct or 0),
             delta_hours=delta_hours,
+            coking_factor=coking_factor,
         )
         pred["algorithm"] = model_dict.get("algorithm", "Unknown")
         return pred

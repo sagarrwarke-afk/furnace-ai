@@ -25,7 +25,7 @@ from app.engine.furnace_runlength_forecasting import (
     FleetOptimizer, EconomicGainsCalculator,
 )
 from app.engine.model_benchmark import ModelBenchmark
-from app.services.training import load_active_models, _coil_data_or_legacy
+from app.services.training import load_active_models, _coil_data_or_legacy, _get_coking_factor
 
 
 def _f(v) -> float:
@@ -339,6 +339,7 @@ def run_whatif(
 
     # Load per-coil data
     coil_data, delta_hours = _coil_data_or_legacy(db, uid, snap, num_coils)
+    coking_factor = _get_coking_factor(db, tech, feed_type)
 
     # Try model-based prediction
     active_models = load_active_models(db)
@@ -355,6 +356,7 @@ def run_whatif(
                 feed_ethane_pct=eth_pct,
                 feed_propane_pct=prop_pct,
                 delta_hours=delta_hours,
+                coking_factor=coking_factor,
             )
 
             # Build adjusted coil data with delta changes applied per-coil
@@ -375,6 +377,7 @@ def run_whatif(
                 feed_ethane_pct=eth_pct,
                 feed_propane_pct=prop_pct,
                 delta_hours=delta_hours,
+                coking_factor=coking_factor,
             )
 
             # Model-predicted baseline and new values

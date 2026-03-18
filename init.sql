@@ -315,6 +315,17 @@ VALUES
     ('ALL', 'ALL', 'coking_rate', 'per_ethane_pct',  0.080, 'rate/%ethane',   'manual');
 
 -- ---------------------------------------------------------------------------
+-- Coking Factors for Thickness Evolution (dimensionless multiplier)
+-- effective_thickness = prev + coking_factor * predicted_coking_rate * (delta_hours / 720)
+-- ---------------------------------------------------------------------------
+INSERT INTO sensitivity_config (technology, feed_type, parameter, sensitivity_type, value, unit, source)
+VALUES
+    ('Lummus',  'Ethane',  'coking_factor', 'thickness_evolution', 0.3150, 'dimensionless', 'manual'),
+    ('Lummus',  'Propane', 'coking_factor', 'thickness_evolution', 0.7100, 'dimensionless', 'manual'),
+    ('Technip', 'Ethane',  'coking_factor', 'thickness_evolution', 0.9000, 'dimensionless', 'manual'),
+    ('Technip', 'Propane', 'coking_factor', 'thickness_evolution', 0.9000, 'dimensionless', 'manual');
+
+-- ---------------------------------------------------------------------------
 -- Economic Parameters
 -- ---------------------------------------------------------------------------
 INSERT INTO economic_params (param_name, value, unit)
