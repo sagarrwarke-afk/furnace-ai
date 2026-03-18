@@ -82,9 +82,27 @@ export interface ConstraintStatus {
   ok: boolean
 }
 
+export interface CoilInputData {
+  coil: number
+  feed: number
+  cot: number
+  shc: number
+  cop: number
+  cit: number
+  thickness: number
+  delta_hours: number
+}
+
 export interface CoilPrediction {
   coil: number
   thickness: number
+  prev_thickness?: number
+  computed_thickness?: number
+  feed?: number
+  cot?: number
+  shc?: number
+  cop?: number
+  cit?: number
   yield_c2h4?: number
   tmt?: number
   coking_rate?: number
@@ -117,6 +135,8 @@ export interface FurnaceDetail {
   feed_type: string
   design_capacity: number | null
   coke_thickness: number[]
+  coil_data: CoilInputData[] | null
+  computed_thicknesses: number[] | null
   constraints: {
     feed_valve: ConstraintStatus
     fgv: ConstraintStatus
