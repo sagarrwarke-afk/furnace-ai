@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.furnace import UploadHistory, FurnaceSnapshot, FurnaceConfig
-from app.services.training import load_active_models, predict_fleet_values, predict_single_furnace
+from app.services.training import load_active_models, predict_fleet_values, predict_single_furnace, _load_coil_data
 
 router = APIRouter(prefix="/api", tags=["fleet"])
 
@@ -219,13 +219,23 @@ def furnace_detail(
         result["algorithm"] = None
         result["per_coil_predictions"] = None
 
-    # Add coil thickness data
-    result["coke_thickness"] = [
-        _f(snap.coke_thickness_1), _f(snap.coke_thickness_2),
-        _f(snap.coke_thickness_3), _f(snap.coke_thickness_4),
-        _f(snap.coke_thickness_5), _f(snap.coke_thickness_6),
-        _f(snap.coke_thickness_7), _f(snap.coke_thickness_8),
-    ]
+    # Add per-coil input data (from coil_snapshot or legacy thickness columns)
+    coil_data = _load_coil_data(db, uid, furnace_id)
+    if coil_data:
+        result["coil_data"] = coil_data
+        result["coke_thickness"] = [cd["thickness"] for cd in coil_data]
+    else:
+        result["coil_data"] = None
+        result["coke_thickness"] = [
+            _f(snap.coke_thickness_1), _f(snap.coke_thickness_2),
+            _f(snap.coke_thickness_3), _f(snap.coke_thickness_4),
+            _f(snap.coke_thickness_5), _f(snap.coke_thickness_6),
+            _f(snap.coke_thickness_7), _f(snap.coke_thickness_8),
+        ]
+
+    # Add computed thicknesses from model prediction
+    if pred is not None:
+        result["computed_thicknesses"] = pred.get("computed_thicknesses")
 
     # Constraint status (uses model-predicted TMT when available)
     effective_tmt = result["tmt_max"] or 0

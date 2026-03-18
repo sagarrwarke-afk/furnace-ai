@@ -1,6 +1,6 @@
 from sqlalchemy import (
-    Column, Integer, String, Numeric, Boolean, Text, DateTime, LargeBinary,
-    ForeignKey, UniqueConstraint,
+    Column, Integer, SmallInteger, String, Numeric, Boolean, Text, DateTime,
+    LargeBinary, ForeignKey, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
@@ -59,6 +59,23 @@ class FurnaceSnapshot(Base):
     coke_thickness_6 = Column(Numeric(6, 3))
     coke_thickness_7 = Column(Numeric(6, 3))
     coke_thickness_8 = Column(Numeric(6, 3))
+
+
+class CoilSnapshot(Base):
+    __tablename__ = "coil_snapshot"
+
+    id = Column(Integer, primary_key=True)
+    upload_id = Column(Integer, ForeignKey("upload_history.id", ondelete="CASCADE"), nullable=False)
+    snapshot_ts = Column(DateTime(timezone=True), nullable=False)
+    furnace_id = Column(String(10), nullable=False)
+    coil_number = Column(SmallInteger, nullable=False)
+    feed = Column(Numeric(8, 3))
+    cot = Column(Numeric(6, 2))
+    shc = Column(Numeric(5, 3))
+    cop = Column(Numeric(6, 2))
+    cit = Column(Numeric(6, 2))
+    thickness = Column(Numeric(6, 3))
+    delta_hours = Column(Numeric(8, 2))
 
 
 class DownstreamStatus(Base):
