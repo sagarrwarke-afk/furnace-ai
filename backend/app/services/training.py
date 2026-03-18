@@ -506,11 +506,69 @@ def predict_fleet_values(
             )
             # Remove per_coil detail for fleet-level response
             pred_summary = {k: v for k, v in pred.items() if k != "per_coil"}
+            pred_summary["algorithm"] = model_dict.get("algorithm", "Unknown")
             predictions[fid] = pred_summary
         except Exception:
             continue
 
     return predictions
+
+
+# ---------------------------------------------------------------------------
+# Predict single furnace (for furnace detail page)
+# ---------------------------------------------------------------------------
+
+def predict_single_furnace(
+    db: Session,
+    snap,
+    cfg,
+) -> dict | None:
+    """
+    Predict soft sensor values for a single furnace using the active ML model.
+
+    Returns prediction dict with per_coil detail and algorithm name,
+    or None if no active model for this furnace's (technology, feed_type).
+    """
+    active_models = load_active_models(db)
+    if not active_models:
+        return None
+
+    tech = cfg.technology if cfg else "Lummus"
+    feed_type = cfg.feed_type if cfg else (
+        "Ethane" if float(snap.feed_ethane_pct or 0) > 50 else "Propane"
+    )
+    num_coils = cfg.num_coils if cfg else 8
+
+    key = (tech, feed_type)
+    if key not in active_models:
+        return None
+
+    model_dict = active_models[key]
+
+    coil_thicknesses = [
+        float(snap.coke_thickness_1 or 0), float(snap.coke_thickness_2 or 0),
+        float(snap.coke_thickness_3 or 0), float(snap.coke_thickness_4 or 0),
+        float(snap.coke_thickness_5 or 0), float(snap.coke_thickness_6 or 0),
+        float(snap.coke_thickness_7 or 0), float(snap.coke_thickness_8 or 0),
+    ][:num_coils]
+
+    try:
+        pred = ModelBenchmark.predict_furnace(
+            model_dict=model_dict,
+            furnace_feed_rate=float(snap.feed_rate or 0),
+            cot=float(snap.cot or 0),
+            shc=float(snap.shc or 0),
+            cop=float(snap.cop or 0),
+            cit=float(snap.cit or 0),
+            feed_ethane_pct=float(snap.feed_ethane_pct or 0),
+            feed_propane_pct=float(snap.feed_propane_pct or 0),
+            coil_thicknesses=coil_thicknesses,
+            num_coils=num_coils,
+        )
+        pred["algorithm"] = model_dict.get("algorithm", "Unknown")
+        return pred
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------

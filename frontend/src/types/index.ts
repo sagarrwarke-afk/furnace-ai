@@ -29,14 +29,6 @@ export interface FleetKPIs {
   total_furnaces: number
 }
 
-export interface ModelPredicted {
-  yield: number
-  tmt: number
-  coking_rate: number
-  conversion: number
-  propylene: number
-}
-
 export interface FurnaceEntry {
   furnace_id: string
   feed_rate: number | null
@@ -61,7 +53,15 @@ export interface FurnaceEntry {
   ethylene_tph: number
   propylene_tph: number
   rank: number
-  model_predicted?: ModelPredicted | null
+  // Original uploaded (DCS/measured) soft sensor values
+  measured_yield: number | null
+  measured_tmt_max: number | null
+  measured_coking_rate: number | null
+  measured_conversion: number | null
+  measured_propylene: number | null
+  // Prediction source: "model" when ML model active, "measured" when using uploaded values
+  prediction_source: 'model' | 'measured'
+  algorithm: string | null
 }
 
 export interface FleetOverview {
@@ -80,6 +80,16 @@ export interface ConstraintStatus {
   alarm?: number
   warning?: number
   ok: boolean
+}
+
+export interface CoilPrediction {
+  coil: number
+  thickness: number
+  yield_c2h4?: number
+  tmt?: number
+  coking_rate?: number
+  conversion?: number
+  propylene?: number
 }
 
 export interface FurnaceDetail {
@@ -113,6 +123,17 @@ export interface FurnaceDetail {
     damper: ConstraintStatus
     tmt_max: ConstraintStatus
   }
+  // Original uploaded (DCS/measured) soft sensor values
+  measured_yield: number | null
+  measured_tmt_max: number | null
+  measured_coking_rate: number | null
+  measured_conversion: number | null
+  measured_propylene: number | null
+  // Prediction source: "model" when ML model active, "measured" when using uploaded values
+  prediction_source: 'model' | 'measured'
+  algorithm: string | null
+  // Per-coil model predictions (when model active)
+  per_coil_predictions: CoilPrediction[] | null
 }
 
 // ── What-If Simulator ─────────────────────────────────────────────────────────

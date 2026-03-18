@@ -68,6 +68,11 @@ function FurnaceCard({ fur }: { fur: FurnaceEntry }) {
             <span className={`w-2 h-2 rounded-full ${sc.dot}`} />
             <span className="font-bold text-[#D4D4D4] text-base">{fur.furnace_id}</span>
             <span className="text-[10px] text-[#9E9E9E]">{fur.technology ?? ''}</span>
+            {fur.prediction_source === 'model' && (
+              <span className="text-[9px] text-[#00B4CC] bg-[#00B4CC]/10 px-1.5 py-0.5 rounded font-semibold" title={`Soft sensors predicted by ${fur.algorithm ?? 'ML Model'}`}>
+                ML
+              </span>
+            )}
           </div>
           <div className="text-[10px] text-[#9E9E9E] mt-0.5">{fur.feed_type ?? ''} feed</div>
         </div>
@@ -134,7 +139,12 @@ function RankTable({ furnaces, label }: { furnaces: FurnaceEntry[]; label: strin
               return (
                 <tr key={fur.furnace_id} className={i % 2 === 0 ? 'bg-[#001E35]' : 'bg-[#1A2B3C]'}>
                   <td className="px-3 py-2 text-[#4A4A4A]">{fur.rank}</td>
-                  <td className="px-3 py-2 font-medium text-[#D4D4D4]">{fur.furnace_id}</td>
+                  <td className="px-3 py-2 font-medium text-[#D4D4D4]">
+                    {fur.furnace_id}
+                    {fur.prediction_source === 'model' && (
+                      <span className="ml-1 text-[8px] text-[#00B4CC] bg-[#00B4CC]/10 px-1 py-0.5 rounded font-semibold" title={`ML: ${fur.algorithm}`}>ML</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-[#D4D4D4]">{f(fur.feed_rate, 1)}</td>
                   <td className="px-3 py-2 text-[#D4D4D4]">{f(fur.cot, 1)}</td>
                   <td className="px-3 py-2 text-[#D4D4D4]">{f(fur.yield, 1)}</td>
@@ -206,8 +216,13 @@ export default function FleetOverview() {
 
       {/* Furnace cards */}
       <div>
-        <h2 className="text-[#9E9E9E] text-xs font-semibold uppercase tracking-wider mb-3">
+        <h2 className="text-[#9E9E9E] text-xs font-semibold uppercase tracking-wider mb-3 flex items-center gap-2">
           Furnace Cards — Upload #{data.upload_id}
+          {data.has_active_models && (
+            <span className="text-[10px] text-[#00B4CC] bg-[#00B4CC]/10 px-2 py-0.5 rounded normal-case font-normal">
+              ML models active — soft sensor values are model-predicted
+            </span>
+          )}
         </h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
           {allFurnaces.map((fur) => (
