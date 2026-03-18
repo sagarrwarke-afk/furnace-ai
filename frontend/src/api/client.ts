@@ -15,6 +15,7 @@ import type {
   ActivateModelResponse,
   EconomicParamsResponse,
   ConstraintsResponse,
+  BenchmarkResponse,
 } from '../types'
 
 const api = axios.create({
@@ -109,14 +110,40 @@ export async function trainModel(
   file: File,
   technology: string,
   feedType: string,
+  algorithm: string = 'Ridge',
 ): Promise<TrainModelResponse> {
   const form = new FormData()
   form.append('file', file)
   form.append('technology', technology)
   form.append('feed_type', feedType)
+  form.append('algorithm', algorithm)
   const res = await api.post<TrainModelResponse>('/api/train-model', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
   })
+  return res.data
+}
+
+export async function benchmarkModels(
+  file: File,
+  technology: string,
+  feedType: string,
+  algorithms: string[],
+): Promise<BenchmarkResponse> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('technology', technology)
+  form.append('feed_type', feedType)
+  form.append('algorithms', algorithms.join(','))
+  const res = await api.post<BenchmarkResponse>('/api/benchmark-models', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 300000,  // 5 min — benchmarking can be slow
+  })
+  return res.data
+}
+
+export async function getAvailableAlgorithms(): Promise<{ algorithms: string[] }> {
+  const res = await api.get<{ algorithms: string[] }>('/api/available-algorithms')
   return res.data
 }
 

@@ -1,6 +1,10 @@
 """
-Model training service: trains GBR soft-sensor models from CSV data,
-pickles them to model_registry, and extracts sensitivities by perturbation.
+Model training service: benchmarks multiple algorithms, trains production
+soft-sensor models, pickles to model_registry, and extracts sensitivities.
+
+Supports: Ridge, RandomForest, GradientBoosting, XGBoost, LightGBM.
+Uses per-coil prediction: simulation data is per-coil, furnace-level
+predictions divide feed by num_coils and aggregate (TMT=MAX, yield=MEAN).
 """
 
 import io
@@ -10,20 +14,19 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
-from sqlalchemy.sql import func
 
-from app.engine.furnace_runlength_forecasting import (
-    FurnaceSoftSensorModels,
-    INDEPENDENT_VARS,
-    TARGET_VARS,
+from app.engine.model_benchmark import (
+    ModelBenchmark,
+    BASE_FEATURES,
+    TARGETS,
 )
-from app.models.furnace import ModelRegistry, SensitivityConfig, AuditLog
+from app.models.furnace import ModelRegistry, SensitivityConfig, AuditLog, FurnaceConfig
 
 
 # Targets we extract sensitivities for
 SENSITIVITY_TARGETS = ["yield_c2h4", "propylene", "conversion", "tmt", "coking_rate"]
 
-# Maps engine target names → sensitivity_config parameter names
+# Maps engine target names -> sensitivity_config parameter names
 TARGET_TO_PARAM = {
     "yield_c2h4": "ethylene_yield",
     "propylene": "propylene",
@@ -35,26 +38,23 @@ TARGET_TO_PARAM = {
 
 def _build_base_point(df: pd.DataFrame) -> dict:
     """Return the median of each feature column as the base operating point."""
-    return {col: float(df[col].median()) for col in INDEPENDENT_VARS if col in df.columns}
+    return {col: float(df[col].median()) for col in BASE_FEATURES if col in df.columns}
 
 
-def _extract_sensitivities(
-    model_set: FurnaceSoftSensorModels,
+def _extract_sensitivities_from_model_dict(
+    model_dict: dict,
     base_point: dict,
 ) -> dict[str, float]:
     """
-    Extract sensitivities by perturbation:
-      - COT +1°C  → Δtarget / 1  = per_cot_degC
-      - SHC +0.01 → Δtarget / 0.01 = per_shc_001 (for run_length proxy via coking_rate)
-    Returns dict like {"ethylene_yield_per_cot": 0.218, "tmt_per_cot": 1.66, ...}
+    Extract sensitivities by perturbation using the new model_dict format.
     """
     sensitivities = {}
 
-    base_pred = model_set.predict(base_point)
+    base_pred = ModelBenchmark.predict(model_dict, base_point)
 
-    # --- COT perturbation (+1°C) ---
+    # --- COT perturbation (+1 deg C) ---
     perturbed = {**base_point, "cot": base_point["cot"] + 1.0}
-    pert_pred = model_set.predict(perturbed)
+    pert_pred = ModelBenchmark.predict(model_dict, perturbed)
 
     for target in SENSITIVITY_TARGETS:
         if target in base_pred and target in pert_pred:
@@ -64,11 +64,9 @@ def _extract_sensitivities(
 
     # --- SHC perturbation (+0.01) ---
     perturbed_shc = {**base_point, "shc": base_point["shc"] + 0.01}
-    shc_pred = model_set.predict(perturbed_shc)
+    shc_pred = ModelBenchmark.predict(model_dict, perturbed_shc)
 
     if "coking_rate" in base_pred and "coking_rate" in shc_pred:
-        # Lower coking_rate → longer run. Approximate run_length sensitivity
-        # from coking_rate change: if coking drops, run extends.
         delta_coking = shc_pred["coking_rate"] - base_pred["coking_rate"]
         sensitivities["coking_rate_per_shc_001"] = round(delta_coking, 4)
 
@@ -79,7 +77,7 @@ def _extract_sensitivities(
             "feed_ethane_pct": base_point["feed_ethane_pct"] + 1.0,
             "feed_propane_pct": base_point.get("feed_propane_pct", 0) - 1.0,
         }
-        eth_pred = model_set.predict(perturbed_eth)
+        eth_pred = ModelBenchmark.predict(model_dict, perturbed_eth)
         for target in SENSITIVITY_TARGETS:
             if target in base_pred and target in eth_pred:
                 delta = eth_pred[target] - base_pred[target]
@@ -89,7 +87,7 @@ def _extract_sensitivities(
     # --- Thickness perturbation (+0.5 mm) ---
     if "thickness" in base_point:
         perturbed_thick = {**base_point, "thickness": base_point["thickness"] + 0.5}
-        thick_pred = model_set.predict(perturbed_thick)
+        thick_pred = ModelBenchmark.predict(model_dict, perturbed_thick)
         for target in ["coking_rate", "tmt"]:
             if target in base_pred and target in thick_pred:
                 delta = thick_pred[target] - base_pred[target]
@@ -102,14 +100,7 @@ def _extract_sensitivities(
 def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Accept both the dedicated training CSV format AND the standard operating
-    data upload template, renaming columns as needed so the engine always
-    receives the canonical feature names.
-
-    Upload template → canonical mapping:
-      feed_rate  → feed
-      tmt_max    → tmt       (also used as target)
-      yield      → yield_c2h4  (the engine target name)
-      coke_thickness_1..8 → thickness (mean of available columns)
+    data upload template, renaming columns as needed.
     """
     df = df.copy()
 
@@ -121,17 +112,14 @@ def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
         if src in df.columns and dst not in df.columns:
             df.rename(columns={src: dst}, inplace=True)
 
-    # yield → yield_c2h4 (engine target name)
     if "yield" in df.columns and "yield_c2h4" not in df.columns:
         df.rename(columns={"yield": "yield_c2h4"}, inplace=True)
 
-    # Compute thickness as mean of coke_thickness_N columns
     if "thickness" not in df.columns:
         thick_cols = [c for c in df.columns if c.startswith("coke_thickness_")]
         if thick_cols:
             df["thickness"] = df[thick_cols].mean(axis=1)
 
-    # Drop non-numeric / metadata columns that would confuse the model builder
     drop_cols = [
         "timestamp", "furnace_id", "status",
         "feed_valve_pct", "fgv_pct", "damper_pct",
@@ -142,63 +130,117 @@ def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ---------------------------------------------------------------------------
+# Benchmark models (compare algorithms)
+# ---------------------------------------------------------------------------
+
+def benchmark_models(
+    db: Session,
+    csv_bytes: bytes,
+    technology: str,
+    feed_type: str,
+    selected_algorithms: list[str],
+) -> dict:
+    """
+    Benchmark user-selected algorithms on the provided CSV data.
+    Returns comparison metrics + recommendation.
+    """
+    df = pd.read_csv(io.BytesIO(csv_bytes))
+    df = _normalise_columns(df)
+
+    if len(df) < 50:
+        raise ValueError(
+            f"CSV has only {len(df)} rows -- need at least 50 to benchmark."
+        )
+
+    # Run benchmark
+    bench_results = ModelBenchmark.run_benchmark(df, selected_algorithms)
+
+    # Run interpolation test
+    interp_results = ModelBenchmark.run_interpolation_test(df, selected_algorithms)
+
+    # Grid analysis
+    grid = ModelBenchmark.analyze_grid(df)
+
+    # Recommendation
+    recommended, reason, scores = ModelBenchmark.recommend(bench_results, interp_results)
+
+    # Build response
+    algorithms_list = []
+    for algo_name in selected_algorithms:
+        algo_metrics = bench_results.get(algo_name, {})
+        interp = interp_results.get(algo_name, {})
+
+        algorithms_list.append({
+            "algorithm": algo_name,
+            "metrics": algo_metrics,
+            "interpolation_r2": interp.get("mean_r2"),
+            "interpolation_mape": interp.get("mean_mape"),
+            "overall_score": scores.get(algo_name, 0.0),
+            "recommended": algo_name == recommended,
+            "recommendation_reason": reason if algo_name == recommended else None,
+        })
+
+    # Sort by score descending
+    algorithms_list.sort(key=lambda x: x["overall_score"], reverse=True)
+
+    return {
+        "technology": technology,
+        "feed_type": feed_type,
+        "n_rows": len(df),
+        "selected_algorithms": selected_algorithms,
+        "algorithms": algorithms_list,
+        "recommended_algorithm": recommended,
+        "recommendation_reason": reason,
+        "grid_analysis": grid,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Train production model
+# ---------------------------------------------------------------------------
+
 def train_model(
     db: Session,
     csv_bytes: bytes,
     technology: str,
     feed_type: str,
+    algorithm: str = "Ridge",
 ) -> dict:
     """
-    Train GBR models from CSV data, pickle to model_registry,
-    extract sensitivities, return metrics.
+    Train a production soft-sensor model using the specified algorithm.
+    Pickles to model_registry, extracts sensitivities.
     """
     df = pd.read_csv(io.BytesIO(csv_bytes))
-
-    # Accept upload-template column aliases so users can train directly
-    # from their operating data CSV without reformatting
     df = _normalise_columns(df)
 
     if len(df) < 50:
         raise ValueError(
-            f"CSV has only {len(df)} data rows — need at least 50 rows to train. "
-            "Upload multiple snapshots or historical operating data."
+            f"CSV has only {len(df)} data rows -- need at least 50 rows to train."
         )
 
-    model_name = f"{technology}-{feed_type}"
-    model_set = FurnaceSoftSensorModels(
-        name=model_name,
-        n_estimators=200,
-        max_depth=5,
-        learning_rate=0.1,
-    )
-    try:
-        model_set.build(df, features=INDEPENDENT_VARS, targets=TARGET_VARS)
-    except Exception as e:
-        raise ValueError(f"Model training failed: {e}. Check that the CSV has numeric data in all feature columns.")
+    # Train production model
+    model_dict = ModelBenchmark.train_production_model(df, algorithm)
 
-    if not model_set.models:
-        raise ValueError("No targets had sufficient data to train (need >50 rows per target).")
+    if not model_dict["models"]:
+        raise ValueError("No targets had sufficient data to train.")
 
-    # Pickle entire model_set (models + scaler) as one blob
-    blob = pickle.dumps({"models": model_set.models, "scalers": model_set.scalers, "feature_names": model_set.feature_names})
+    # Pickle entire model_dict as one blob
+    blob = pickle.dumps(model_dict)
 
     now = datetime.now(timezone.utc)
+    model_name = f"{technology}-{feed_type}"
     model_ids = []
 
-    for target, model in model_set.models.items():
-        metrics = model_set.metrics.get(target, {})
+    for target, model in model_dict["models"].items():
+        metrics = model_dict["metrics"].get(target, {})
         reg = ModelRegistry(
             model_name=model_name,
             technology=technology,
             feed_type=feed_type,
             target=target,
-            algorithm="GradientBoostingRegressor",
-            hyperparams={
-                "n_estimators": 200,
-                "max_depth": 5,
-                "learning_rate": 0.1,
-                "subsample": 0.8,
-            },
+            algorithm=algorithm,
+            hyperparams={"algorithm": algorithm},
             metrics=metrics,
             model_blob=blob,
             active=False,
@@ -210,7 +252,7 @@ def train_model(
 
     # Extract sensitivities by perturbation
     base_point = _build_base_point(df)
-    extracted_sens = _extract_sensitivities(model_set, base_point)
+    extracted_sens = _extract_sensitivities_from_model_dict(model_dict, base_point)
 
     # Audit
     db.add(AuditLog(
@@ -220,15 +262,16 @@ def train_model(
         details={
             "technology": technology,
             "feed_type": feed_type,
-            "targets": list(model_set.models.keys()),
+            "algorithm": algorithm,
+            "targets": list(model_dict["models"].keys()),
             "extracted_sensitivities": extracted_sens,
         },
     ))
     db.commit()
 
-    # Build response metrics dict
+    # Build response metrics
     resp_metrics = {}
-    for target, m in model_set.metrics.items():
+    for target, m in model_dict["metrics"].items():
         resp_metrics[target] = {
             "r2_train": m["r2_train"],
             "r2_test": m["r2_test"],
@@ -242,17 +285,21 @@ def train_model(
         "model_ids": model_ids,
         "technology": technology,
         "feed_type": feed_type,
-        "targets_trained": list(model_set.models.keys()),
+        "algorithm": algorithm,
+        "targets_trained": list(model_dict["models"].keys()),
         "metrics": resp_metrics,
         "extracted_sensitivities": extracted_sens,
     }
 
 
+# ---------------------------------------------------------------------------
+# Activate model
+# ---------------------------------------------------------------------------
+
 def activate_model(db: Session, model_id: int) -> dict:
     """
     Activate a model: sets active=True, deactivates others for same
-    (technology, feed_type, target), and copies extracted sensitivities
-    to sensitivity_config.
+    (technology, feed_type, target), and copies extracted sensitivities.
     """
     model = db.query(ModelRegistry).filter(ModelRegistry.id == model_id).first()
     if not model:
@@ -268,9 +315,6 @@ def activate_model(db: Session, model_id: int) -> dict:
 
     model.active = True
 
-    # Copy COT sensitivity from model metrics to sensitivity_config
-    # The model's metrics contain r2/mae etc. The sensitivities are extracted
-    # at training time and stored in audit_log. We re-derive from the model blob.
     sens_copied = _copy_sensitivities_from_model(db, model)
 
     db.add(AuditLog(
@@ -281,6 +325,7 @@ def activate_model(db: Session, model_id: int) -> dict:
             "technology": model.technology,
             "feed_type": model.feed_type,
             "target": model.target,
+            "algorithm": model.algorithm,
             "sensitivities_copied": sens_copied,
         },
     ))
@@ -295,34 +340,37 @@ def activate_model(db: Session, model_id: int) -> dict:
 
 
 def _copy_sensitivities_from_model(db: Session, model: ModelRegistry) -> int:
-    """
-    Re-derive sensitivities from model blob by perturbation, then upsert
-    into sensitivity_config table. Returns count of rows written.
-    """
+    """Re-derive sensitivities from model blob, upsert to sensitivity_config."""
     if not model.model_blob:
         return 0
 
-    data = pickle.loads(model.model_blob)
-    model_set = FurnaceSoftSensorModels(name=model.model_name)
-    model_set.models = data["models"]
-    model_set.scalers = data["scalers"]
-    model_set.feature_names = data["feature_names"]
+    model_dict = pickle.loads(model.model_blob)
 
-    # Build a plausible base point from feature means embedded in the scaler
-    scaler = model_set.scalers.get("X")
+    # Build base point from scaler means
+    scaler = model_dict.get("scaler")
+    feature_names = model_dict.get("feature_names", [])
+    base_features = model_dict.get("base_features", BASE_FEATURES)
+
     if scaler is None:
         return 0
 
-    base_point = dict(zip(model_set.feature_names, scaler.mean_))
-    extracted = _extract_sensitivities(model_set, base_point)
+    # Use scaler means for base features only
+    base_point = {}
+    for i, fname in enumerate(feature_names):
+        if fname in base_features and i < len(scaler.mean_):
+            base_point[fname] = float(scaler.mean_[i])
 
-    # Map extracted keys to sensitivity_config rows
-    # e.g. "ethylene_yield_per_cot" → (technology, feed_type, "ethylene_yield", "per_cot_degC")
+    # Fill any missing base features
+    for bf in base_features:
+        if bf not in base_point:
+            base_point[bf] = 0.0
+
+    extracted = _extract_sensitivities_from_model_dict(model_dict, base_point)
+
     count = 0
     now = datetime.now(timezone.utc)
 
     for key, value in extracted.items():
-        # Parse key: "<param>_per_cot" or "<param>_per_ethane_pct" etc.
         if "_per_cot" in key:
             param = key.replace("_per_cot", "")
             sens_type = "per_cot_degC"
@@ -363,6 +411,111 @@ def _copy_sensitivities_from_model(db: Session, model: ModelRegistry) -> int:
 
     return count
 
+
+# ---------------------------------------------------------------------------
+# Load active models (for optimizer/whatif/fleet)
+# ---------------------------------------------------------------------------
+
+def load_active_models(db: Session) -> dict[tuple[str, str], dict]:
+    """
+    Load active models from model_registry, grouped by (technology, feed_type).
+    Returns {(tech, feed_type): unpickled_model_dict}.
+
+    Only loads one blob per (tech, feed_type) since all targets share the same blob.
+    """
+    rows = db.query(ModelRegistry).filter(ModelRegistry.active == True).all()  # noqa: E712
+
+    loaded = {}
+    for r in rows:
+        key = (r.technology, r.feed_type)
+        if key in loaded:
+            continue  # already loaded this tech+feed combo
+        if not r.model_blob:
+            continue
+        try:
+            model_dict = pickle.loads(r.model_blob)
+            loaded[key] = model_dict
+        except Exception:
+            continue
+
+    return loaded
+
+
+# ---------------------------------------------------------------------------
+# Predict fleet values (model-calculated actuals)
+# ---------------------------------------------------------------------------
+
+def predict_fleet_values(
+    db: Session,
+    snapshots: list,
+    configs: dict,
+    active_models: dict | None = None,
+) -> dict[str, dict]:
+    """
+    For each furnace, use active model to predict soft sensor values
+    from X inputs (feed, cot, shc, cop, cit, thickness, compositions).
+
+    Returns {furnace_id: {yield_c2h4, tmt, coking_rate, conversion, propylene}}.
+    """
+    if active_models is None:
+        active_models = load_active_models(db)
+
+    if not active_models:
+        return {}
+
+    predictions = {}
+    for s in snapshots:
+        fid = s.furnace_id
+        status_raw = (s.status or "").lower()
+        if "decoke" in status_raw:
+            continue
+
+        cfg = configs.get(fid)
+        tech = cfg.technology if cfg else "Lummus"
+        feed_type = cfg.feed_type if cfg else (
+            "Ethane" if float(s.feed_ethane_pct or 0) > 50 else "Propane"
+        )
+        num_coils = cfg.num_coils if cfg else 8
+
+        key = (tech, feed_type)
+        if key not in active_models:
+            continue
+
+        model_dict = active_models[key]
+
+        # Get per-coil thicknesses
+        coil_thicknesses = [
+            float(s.coke_thickness_1 or 0), float(s.coke_thickness_2 or 0),
+            float(s.coke_thickness_3 or 0), float(s.coke_thickness_4 or 0),
+            float(s.coke_thickness_5 or 0), float(s.coke_thickness_6 or 0),
+            float(s.coke_thickness_7 or 0), float(s.coke_thickness_8 or 0),
+        ][:num_coils]
+
+        try:
+            pred = ModelBenchmark.predict_furnace(
+                model_dict=model_dict,
+                furnace_feed_rate=float(s.feed_rate or 0),
+                cot=float(s.cot or 0),
+                shc=float(s.shc or 0),
+                cop=float(s.cop or 0),
+                cit=float(s.cit or 0),
+                feed_ethane_pct=float(s.feed_ethane_pct or 0),
+                feed_propane_pct=float(s.feed_propane_pct or 0),
+                coil_thicknesses=coil_thicknesses,
+                num_coils=num_coils,
+            )
+            # Remove per_coil detail for fleet-level response
+            pred_summary = {k: v for k, v in pred.items() if k != "per_coil"}
+            predictions[fid] = pred_summary
+        except Exception:
+            continue
+
+    return predictions
+
+
+# ---------------------------------------------------------------------------
+# List models
+# ---------------------------------------------------------------------------
 
 def list_models(db: Session) -> list[dict]:
     """List all models with metrics and active status."""

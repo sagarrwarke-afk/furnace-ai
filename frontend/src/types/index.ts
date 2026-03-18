@@ -29,6 +29,14 @@ export interface FleetKPIs {
   total_furnaces: number
 }
 
+export interface ModelPredicted {
+  yield: number
+  tmt: number
+  coking_rate: number
+  conversion: number
+  propylene: number
+}
+
 export interface FurnaceEntry {
   furnace_id: string
   feed_rate: number | null
@@ -53,10 +61,12 @@ export interface FurnaceEntry {
   ethylene_tph: number
   propylene_tph: number
   rank: number
+  model_predicted?: ModelPredicted | null
 }
 
 export interface FleetOverview {
   upload_id: number
+  has_active_models?: boolean
   kpis: FleetKPIs
   ethane_furnaces: FurnaceEntry[]
   propane_furnaces: FurnaceEntry[]
@@ -121,6 +131,8 @@ export interface WhatIfResponse {
   furnace_id: string
   technology: string
   feed_type: string
+  prediction_source?: 'model' | 'sensitivity'
+  algorithm?: string | null
   baseline: {
     cot: number | null
     shc: number | null
@@ -206,9 +218,42 @@ export interface TrainModelResponse {
   model_ids: number[]
   technology: string
   feed_type: string
+  algorithm: string
   targets_trained: string[]
   metrics: Record<string, TargetMetrics>
   extracted_sensitivities: Record<string, number>
+}
+
+// ── Benchmark ────────────────────────────────────────────────────────────────
+
+export interface BenchmarkTargetMetrics {
+  r2: number
+  rmse: number
+  mape_pct: number
+  r2_train: number
+  n_train: number
+  n_test: number
+}
+
+export interface BenchmarkAlgorithmResult {
+  algorithm: string
+  metrics: Record<string, BenchmarkTargetMetrics>
+  interpolation_r2: number | null
+  interpolation_mape: number | null
+  overall_score: number
+  recommended: boolean
+  recommendation_reason?: string | null
+}
+
+export interface BenchmarkResponse {
+  technology: string
+  feed_type: string
+  n_rows: number
+  selected_algorithms: string[]
+  algorithms: BenchmarkAlgorithmResult[]
+  recommended_algorithm: string
+  recommendation_reason: string
+  grid_analysis: Record<string, number>
 }
 
 export interface ModelItem {

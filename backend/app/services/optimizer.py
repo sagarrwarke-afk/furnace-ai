@@ -4,6 +4,10 @@ Service layer for fleet optimization.
 Reads furnace snapshots, config, sensitivities, economics, and constraints
 from DB, builds the fleet dict expected by FleetOptimizer, runs the engine,
 and persists results.
+
+When an active ML model exists for a furnace's (technology, feed_type),
+the what-if simulator uses model.predict_furnace() for per-coil prediction
+instead of fixed sensitivities.
 """
 
 from __future__ import annotations
@@ -20,6 +24,8 @@ from app.models.furnace import (
 from app.engine.furnace_runlength_forecasting import (
     FleetOptimizer, EconomicGainsCalculator,
 )
+from app.engine.model_benchmark import ModelBenchmark
+from app.services.training import load_active_models
 
 
 def _f(v) -> float:
@@ -197,10 +203,13 @@ def run_optimizer(
         decoke_downtime_days=econ_params.get("decoke_downtime", 3),
     )
 
+    # Load active ML models (if any) for model-based predictions
+    active_models = load_active_models(db)
+
     # Build optimizer
     optimizer = FleetOptimizer(
         econ=econ,
-        soft_sensor_models=None,  # no trained models yet
+        soft_sensor_models=active_models if active_models else None,
         ethane_feed_purity=ethane_feed_purity,
         propane_feed_purity=propane_feed_purity,
     )
@@ -286,8 +295,10 @@ def run_whatif(
 ) -> dict:
     """
     Single-furnace what-if simulation.
-    Apply delta_cot, delta_shc, delta_feed to one furnace and predict new
-    yield, conversion, propylene, TMT, run length using sensitivities.
+
+    When an active ML model exists for this furnace's (technology, feed_type),
+    uses ModelBenchmark.predict_furnace() for per-coil prediction.
+    Otherwise falls back to sensitivity-based linear deltas.
     """
     uid = resolve_upload_id(upload_id, db)
 
@@ -310,42 +321,128 @@ def run_whatif(
     feed_type = cfg.feed_type if cfg else (
         "Ethane" if _f(snap.feed_ethane_pct) > 50 else "Propane"
     )
+    num_coils = cfg.num_coils if cfg else 8
 
-    # Build a mini fleet optimizer just for sensitivity lookup
-    optimizer = FleetOptimizer(
-        ethane_feed_purity=ethane_feed_purity,
-        propane_feed_purity=propane_feed_purity,
-    )
-    furnace_dict = {
-        "feed": feed_type,
-        "tech": tech,
-        "feed_ethane_pct": _f(snap.feed_ethane_pct),
-    }
-    sens = optimizer.get_sens(furnace_dict)
-
-    # Baseline values
-    base_yield = _f(snap.yield_)
-    base_conv = _f(snap.conversion)
-    base_prop = _f(snap.propylene)
-    base_tmt = _f(snap.tmt_max)
+    # Baseline values (from DCS / uploaded data)
+    base_feed = _f(snap.feed_rate)
+    base_cot = _f(snap.cot)
+    base_shc = _f(snap.shc)
     base_sec = _f(snap.sec)
     base_run = snap.run_days_total or 120
-    base_feed = _f(snap.feed_rate)
-    base_coking = _f(snap.coking_rate)
+    eth_pct = _f(snap.feed_ethane_pct)
+    prop_pct = _f(snap.feed_propane_pct)
 
-    # Apply deltas using sensitivities
-    new_cot = _f(snap.cot) + delta_cot
-    new_shc = _f(snap.shc) + delta_shc
+    # New operating conditions
+    new_cot = base_cot + delta_cot
+    new_shc = base_shc + delta_shc
     new_feed = base_feed + delta_feed
 
-    new_yield = base_yield + delta_cot * sens["yld_cot"]
-    new_conv = base_conv + delta_cot * sens["conv_cot"]
-    new_prop = base_prop + delta_cot * sens["prop_cot"]
-    new_tmt = base_tmt + delta_cot * sens["tmt_cot"]
-    new_sec = base_sec + delta_cot * 0.02 - delta_shc * 5
-    new_run = max(30, round(base_run + delta_cot * sens["run_cot"]
-                            + (delta_shc * 100) * sens["run_shc"]))
-    new_coking = base_coking + delta_cot * sens["coking_cot"]
+    # Per-coil thicknesses
+    coil_thicknesses = [
+        _f(snap.coke_thickness_1), _f(snap.coke_thickness_2),
+        _f(snap.coke_thickness_3), _f(snap.coke_thickness_4),
+        _f(snap.coke_thickness_5), _f(snap.coke_thickness_6),
+        _f(snap.coke_thickness_7), _f(snap.coke_thickness_8),
+    ][:num_coils]
+
+    # Try model-based prediction
+    active_models = load_active_models(db)
+    model_key = (tech, feed_type)
+    prediction_source = "sensitivity"
+
+    if model_key in active_models:
+        model_dict = active_models[model_key]
+        try:
+            # Baseline: predict from CURRENT X values (model-calculated)
+            baseline_pred = ModelBenchmark.predict_furnace(
+                model_dict=model_dict,
+                furnace_feed_rate=base_feed,
+                cot=base_cot,
+                shc=base_shc,
+                cop=_f(snap.cop),
+                cit=_f(snap.cit),
+                feed_ethane_pct=eth_pct,
+                feed_propane_pct=prop_pct,
+                coil_thicknesses=coil_thicknesses,
+                num_coils=num_coils,
+            )
+
+            # Predicted: with adjusted operating conditions
+            new_pred = ModelBenchmark.predict_furnace(
+                model_dict=model_dict,
+                furnace_feed_rate=new_feed,
+                cot=new_cot,
+                shc=new_shc,
+                cop=_f(snap.cop),
+                cit=_f(snap.cit),
+                feed_ethane_pct=eth_pct,
+                feed_propane_pct=prop_pct,
+                coil_thicknesses=coil_thicknesses,
+                num_coils=num_coils,
+            )
+
+            # Model-predicted baseline and new values
+            base_yield = baseline_pred.get("yield_c2h4", _f(snap.yield_))
+            base_conv = baseline_pred.get("conversion", _f(snap.conversion))
+            base_prop = baseline_pred.get("propylene", _f(snap.propylene))
+            base_tmt = baseline_pred.get("tmt", _f(snap.tmt_max))
+            base_coking = baseline_pred.get("coking_rate", _f(snap.coking_rate))
+
+            new_yield = new_pred.get("yield_c2h4", base_yield)
+            new_conv = new_pred.get("conversion", base_conv)
+            new_prop = new_pred.get("propylene", base_prop)
+            new_tmt = new_pred.get("tmt", base_tmt)
+            new_coking = new_pred.get("coking_rate", base_coking)
+
+            # Run length still via sensitivity (models don't predict run_days)
+            optimizer = FleetOptimizer(
+                ethane_feed_purity=ethane_feed_purity,
+                propane_feed_purity=propane_feed_purity,
+            )
+            furnace_dict = {
+                "feed": feed_type, "tech": tech,
+                "feed_ethane_pct": eth_pct,
+            }
+            sens = optimizer.get_sens(furnace_dict)
+            new_run = max(30, round(base_run + delta_cot * sens["run_cot"]
+                                    + (delta_shc * 100) * sens["run_shc"]))
+            new_sec = base_sec + delta_cot * 0.02 - delta_shc * 5
+
+            prediction_source = "model"
+            algorithm_name = model_dict.get("algorithm", "Unknown")
+
+        except Exception:
+            # Fall through to sensitivity-based prediction on any error
+            prediction_source = "sensitivity"
+            active_models = {}  # force fallback below
+
+    if prediction_source == "sensitivity":
+        # Fallback: sensitivity-based linear deltas (original logic)
+        optimizer = FleetOptimizer(
+            ethane_feed_purity=ethane_feed_purity,
+            propane_feed_purity=propane_feed_purity,
+        )
+        furnace_dict = {
+            "feed": feed_type, "tech": tech,
+            "feed_ethane_pct": eth_pct,
+        }
+        sens = optimizer.get_sens(furnace_dict)
+
+        base_yield = _f(snap.yield_)
+        base_conv = _f(snap.conversion)
+        base_prop = _f(snap.propylene)
+        base_tmt = _f(snap.tmt_max)
+        base_coking = _f(snap.coking_rate)
+
+        new_yield = base_yield + delta_cot * sens["yld_cot"]
+        new_conv = base_conv + delta_cot * sens["conv_cot"]
+        new_prop = base_prop + delta_cot * sens["prop_cot"]
+        new_tmt = base_tmt + delta_cot * sens["tmt_cot"]
+        new_sec = base_sec + delta_cot * 0.02 - delta_shc * 5
+        new_run = max(30, round(base_run + delta_cot * sens["run_cot"]
+                                + (delta_shc * 100) * sens["run_shc"]))
+        new_coking = base_coking + delta_cot * sens["coking_cot"]
+        algorithm_name = None
 
     # Economics comparison
     econ_params = load_economic_params(db)
@@ -377,6 +474,8 @@ def run_whatif(
         "furnace_id": furnace_id,
         "technology": tech,
         "feed_type": feed_type,
+        "prediction_source": prediction_source,
+        "algorithm": algorithm_name,
         "inputs": {
             "delta_cot": delta_cot,
             "delta_shc": delta_shc,
@@ -384,15 +483,15 @@ def run_whatif(
         },
         "baseline": {
             "feed_rate": base_feed,
-            "cot": _f(snap.cot),
-            "shc": _f(snap.shc),
-            "yield": base_yield,
-            "conversion": base_conv,
-            "propylene": base_prop,
-            "tmt_max": base_tmt,
+            "cot": base_cot,
+            "shc": base_shc,
+            "yield": round(base_yield, 2),
+            "conversion": round(base_conv, 2),
+            "propylene": round(base_prop, 2),
+            "tmt_max": round(base_tmt, 1),
             "sec": base_sec,
             "run_days": base_run,
-            "coking_rate": base_coking,
+            "coking_rate": round(base_coking, 3),
             "net_margin_M": base_econ["net_margin_M"],
         },
         "predicted": {
@@ -423,5 +522,5 @@ def run_whatif(
             "tmt_warning": new_tmt > tmt_warn,
             "tmt_alarm": new_tmt > tmt_alarm,
         },
-        "sensitivities_used": sens,
+        "sensitivities_used": sens if prediction_source == "sensitivity" else None,
     }

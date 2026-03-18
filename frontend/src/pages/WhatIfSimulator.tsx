@@ -194,8 +194,17 @@ export default function WhatIfSimulator() {
 
           {result && (
             <div className="space-y-4">
-              <div className="flex items-center gap-3 text-xs">
+              <div className="flex items-center gap-3 text-xs flex-wrap">
                 <span className="text-[#4A4A4A]">{result.furnace_id} · {result.technology} {result.feed_type}</span>
+                {result.prediction_source === 'model' ? (
+                  <span className="text-[#00B4CC] bg-[#00B4CC]/10 px-2 py-0.5 rounded" title="Predictions from trained ML model (per-coil)">
+                    Predicted by: {result.algorithm ?? 'ML Model'}
+                  </span>
+                ) : (
+                  <span className="text-[#9E9E9E] bg-[#234060] px-2 py-0.5 rounded" title="Predictions from linear sensitivity coefficients">
+                    Predicted by: Sensitivities
+                  </span>
+                )}
                 {result.warnings?.tmt_alarm && (
                   <span className="text-[#E30613] bg-[#E30613]/10 px-2 py-0.5 rounded">TMT ALARM</span>
                 )}
