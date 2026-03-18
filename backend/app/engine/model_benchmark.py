@@ -469,6 +469,7 @@ class ModelBenchmark:
         feed_ethane_pct: float,
         feed_propane_pct: float,
         delta_hours: float = 0.0,
+        coking_factor: float = 1.0,
     ) -> dict[str, Any]:
         """
         Per-coil furnace prediction with true per-coil X variables.
@@ -479,7 +480,8 @@ class ModelBenchmark:
 
         Two-pass thickness calculation (when delta_hours > 0):
         1. Pass 1: predict coking_rate per coil using prev_thickness
-        2. Compute: current_thickness = prev_thickness + coking_rate * delta_hours
+        2. Compute: current_thickness = prev_thickness + coking_factor * coking_rate * (delta_hours / 720)
+           coking_rate in mm/month, coking_factor is technology-specific (from sensitivity_config)
         3. Pass 2: predict all targets using current_thickness
 
         Aggregation: tmt/coking_rate=MAX, yield/conversion/propylene=MEAN.
@@ -533,8 +535,10 @@ class ModelBenchmark:
                 predicted_coking = pass1_pred.get("coking_rate", 0.0) or 0.0
 
                 # Compute current thickness
-                # coking_rate units: mm/day typically, delta_hours in hours
-                effective_thick = prev_thick + predicted_coking * (delta_hours / 24.0)
+                # coking_rate units: mm/month, delta_hours in hours
+                # 1 month ≈ 30 days = 720 hours
+                HOURS_PER_MONTH = 720.0
+                effective_thick = prev_thick + coking_factor * predicted_coking * (delta_hours / HOURS_PER_MONTH)
 
             # Pass 2 (or single pass): predict all targets with effective thickness
             raw = {
