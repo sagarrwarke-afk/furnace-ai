@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.furnace import UploadHistory, FurnaceSnapshot, FurnaceConfig
+from app.services.training import load_active_models, predict_fleet_values
 
 router = APIRouter(prefix="/api", tags=["fleet"])
 
@@ -74,6 +75,15 @@ def fleet_overview(
     # Load furnace configs for technology/feed_type info
     configs = {c.furnace_id: c for c in db.query(FurnaceConfig).all()}
 
+    # Load model predictions (if active models exist)
+    try:
+        active_models = load_active_models(db)
+        model_predictions = predict_fleet_values(
+            db, snapshots, configs, active_models
+        ) if active_models else {}
+    except Exception:
+        model_predictions = {}
+
     ethane_furnaces = []
     propane_furnaces = []
     total_feed = 0.0
@@ -93,6 +103,20 @@ def fleet_overview(
         yld = _f(s.yield_) or 0
         entry["ethylene_tph"] = round(feed * yld / 100, 2)
         entry["propylene_tph"] = round(feed * (_f(s.propylene) or 0) / 100, 2)
+
+        # Add model-predicted values (calculated from X inputs by soft sensor model)
+        fid = s.furnace_id
+        if fid in model_predictions:
+            mp = model_predictions[fid]
+            entry["model_predicted"] = {
+                "yield": round(mp.get("yield_c2h4", 0), 2),
+                "tmt": round(mp.get("tmt", 0), 1),
+                "coking_rate": round(mp.get("coking_rate", 0), 3),
+                "conversion": round(mp.get("conversion", 0), 2),
+                "propylene": round(mp.get("propylene", 0), 2),
+            }
+        else:
+            entry["model_predicted"] = None
 
         if feed_type == "Ethane":
             ethane_furnaces.append(entry)
@@ -123,6 +147,7 @@ def fleet_overview(
 
     return {
         "upload_id": uid,
+        "has_active_models": bool(model_predictions),
         "kpis": {
             "total_feed_tph": round(total_feed, 2),
             "total_ethylene_tph": round(total_ethylene, 2),

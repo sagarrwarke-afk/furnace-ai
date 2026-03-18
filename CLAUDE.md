@@ -6,14 +6,17 @@ Full-stack web app for ethylene cracking furnace fleet optimization. Plant engin
 ## Tech Stack
 - Database: PostgreSQL 16
 - Backend: FastAPI (Python 3.11), SQLAlchemy, openpyxl
-- ML Engine: scikit-learn GBR (GradientBoostingRegressor)
+- ML Engine: Multi-algorithm (Ridge, RandomForest, GradientBoosting, XGBoost, LightGBM) with benchmark-driven selection
 - Frontend: React 18 + TypeScript + Vite + Tailwind CSS + Shadcn/UI
 - Charts: Recharts
 - Data fetching: TanStack React Query
 - Deployment: Docker Compose
 
 ## Architecture
-No real-time historian connection. User uploads Excel with furnace data → FastAPI parses → stores in PostgreSQL → Dashboard reads from DB → Optimizer runs on request → Results saved to DB.
+No real-time historian connection. Two data flows:
+
+1. **Operating Data**: User uploads Excel with furnace data → FastAPI parses → stores in PostgreSQL → Dashboard reads from DB → Optimizer runs on request → Results saved to DB.
+2. **ML Models**: User uploads simulation CSV → Benchmark compares algorithms → User trains selected algorithm → Model pickled to DB → Activated model provides predictions in What-If, Fleet Overview, and Optimizer (with sensitivity-based fallback when no model).
 
 See `docs/fullstack_architecture_v2.md` for full architecture.
 See `engine/furnace_runlength_forecasting.py` for the complete Python engine with soft sensor models, runlength forecaster, economic calculator, and fleet optimizer.
@@ -34,8 +37,12 @@ furnace-ai/
 │   │   ├── models/          # SQLAlchemy ORM
 │   │   ├── schemas/         # Pydantic request/response
 │   │   ├── routers/         # API endpoints
+│   │   │   └── training.py  # benchmark, train, model registry endpoints
 │   │   ├── engine/          # Copied from engine/ folder
+│   │   │   └── model_benchmark.py  # Multi-algo ML benchmark engine
 │   │   └── services/        # Business logic
+│   │       ├── training.py  # benchmark_models, train_model, load_active_models
+│   │       └── optimizer.py # Model-aware what-if & fleet optimizer
 │   ├── templates/
 │   │   └── furnace_template.xlsx
 │   ├── requirements.txt
@@ -94,8 +101,8 @@ Propane furnaces: AF-03, AF-04, AF-06, AF-07
 ## Feed Purity (User Input)
 - ethane_feed_purity: % ethane in feed going to ethane furnaces (fresh+recycle mixed, from analyzer)
 - propane_feed_purity: % propane in feed going to propane furnaces (fresh+recycle mixed, from analyzer)
-- Sensitivities interpolated between pure ethane and pure propane based on actual purity
-- When trained soft sensor models available, pass actual composition to model.predict()
+- When active ML model exists: actual composition passed as feed_ethane_pct/feed_propane_pct features to model.predict()
+- When no model (fallback): sensitivities interpolated between pure ethane and pure propane based on actual purity
 
 ## Cross-Feed Recycle Fractions
 When furnace conversion drops (lower COT), extra unreacted gas exits:
@@ -175,7 +182,7 @@ AF-01 ↓COT -0.5°C | AF-04 ↓COT -3.0°C | Fleet Profit +$1.211M/yr
 - economic_params: prices, costs
 - constraint_limits: valve/TMT/splitter limits
 - cross_feed_config: ethane/propane fractions in unreacted stream
-- model_registry: pickled sklearn models with metrics
+- model_registry: pickled sklearn models with metrics, algorithm name, is_active flag, extracted sensitivities
 
 ### Output (written by optimizer/models)
 - optimizer_results: per-run results with per_furnace JSONB
@@ -184,11 +191,114 @@ AF-01 ↓COT -0.5°C | AF-04 ↓COT -3.0°C | Fleet Profit +$1.211M/yr
 - audit_log: all user actions
 
 ## Soft Sensor Models
+
+### Model Architecture
 - 4 model sets: Lummus-Ethane, Lummus-Propane, Technip-Ethane, Technip-Propane
-- Independent variables (X): feed, shc, cot, cop, cit, feed_ethane_pct, feed_propane_pct, thickness
-- Target variables (Y): yield, coking_rate, tmt, conversion, propylene, acetylene, benzene, methane, hydrogen, etc.
-- Algorithm: GradientBoostingRegressor (200 trees, depth 5, lr 0.1)
-- Typical accuracy: R² > 0.99, MAPE < 1%
+- Each model set contains 5 independent target models (one per target)
+- Base features (X, 8): feed, shc, cot, cop, cit, thickness, feed_ethane_pct, feed_propane_pct
+- Target variables (Y, 5): yield_c2h4, coking_rate, tmt, conversion, propylene
+- 13 engineered features auto-generated from base features (total 21 features)
+- StandardScaler applied to all features before model training
+
+### Available Algorithms (user selects via benchmark)
+| Algorithm | Type | Config |
+|-----------|------|--------|
+| Ridge | Linear | alpha=1.0 (recommended for grid-structured simulation data) |
+| RandomForest | Tree ensemble | 200 trees, depth 10 |
+| GradientBoosting | Tree ensemble | 200 trees, depth 5, lr 0.1 |
+| XGBoost | Tree ensemble | 300 trees, depth 6, lr 0.1, subsample 0.8 |
+| LightGBM | Tree ensemble | 300 trees, 31 leaves, lr 0.1 |
+
+### Engineered Features (13)
+Auto-generated from 8 base features to capture nonlinear interactions:
+- Interactions: cot×shc, cot×feed, shc×feed, ethane×cot, propane×cot
+- Quadratic: cot², shc², thickness²
+- Log transforms: log(cot), log(feed), log(thickness)
+- Derived: cot−cit delta, feed_purity_ratio (ethane/(propane+1))
+
+### Why Ridge is Recommended
+Simulation data is generated on a sparse grid (discrete COT/SHC/feed levels). Tree-based models produce staircase artifacts when interpolating between grid points. Ridge regression with engineered features provides smooth, physically plausible interpolation. This is confirmed by hold-out interpolation testing (remove one grid level, predict it).
+
+### Benchmark Scoring
+```
+Score = 0.4 × mean_test_R² + 0.4 × mean_interpolation_R² + 0.2 × smoothness_bonus
+```
+- Linear models (Ridge) get smoothness bonus = +0.05
+- Tree models get smoothness bonus = 0
+- Interpolation test: removes one grid level per feature, trains on remaining, predicts held-out level
+
+### Typical Accuracy (Ridge on Lummus-Ethane)
+- Test R² > 0.95 on all 5 targets
+- Interpolation R² > 0.97
+- Composite score ~0.993
+
+## ML Training & Activation Flow
+
+### Two-Step UI Flow (Sensitivity Manager Page)
+1. **Benchmark**: User selects technology + feed type, uploads simulation CSV, checks algorithm boxes → POST /api/benchmark-models → sees comparison table + recommendation
+2. **Train & Activate**: User picks recommended (or any) algorithm → POST /api/train-model → sees per-target metrics → PUT /api/models/{id}/activate → model goes live
+
+### What Happens on Training
+1. CSV parsed → 8 base features extracted → 13 engineered features generated
+2. 80/20 train-test split
+3. StandardScaler fitted on training data
+4. One model trained per target (5 models total)
+5. Metrics computed (R² train/test, MAE, MAPE)
+6. Model dict pickled and stored in model_registry table
+7. Sensitivities extracted by perturbation and stored alongside model
+
+### What Happens on Activation
+1. Previous active model for same (technology, feed_type) deactivated
+2. New model marked as active (is_active=true)
+3. 13 sensitivities extracted from model by perturbation and copied to sensitivity_config table:
+   - Per-COT (5): yield, coking_rate, tmt, conversion, propylene per °C
+   - Per-SHC (1): coking_rate per 0.01 SHC
+   - Per-ethane% (5): yield, coking_rate, tmt, conversion, propylene per 1% ethane
+   - Per-thickness (2): tmt, coking_rate per 0.5mm thickness
+4. These sensitivities replace any manual values and are used as fallback when model is unavailable
+
+### Sensitivity Extraction by Perturbation
+Model-derived sensitivities are computed by feeding perturbed inputs:
+- COT: base_point with cot +1°C → delta per target
+- SHC: base_point with shc +0.01 → delta for coking_rate
+- Ethane: base_point with feed_ethane_pct +1% → delta per target
+- Thickness: base_point with thickness +0.5mm → delta for tmt, coking_rate
+
+## Per-Coil Prediction Architecture
+
+Simulation data is per-coil (each coil has its own thickness), so furnace-level predictions use per-coil aggregation:
+
+1. `feed_per_coil = furnace_feed_rate / num_coils`
+2. For each coil: predict with that coil's thickness (8 coils typical)
+3. Aggregate across coils:
+   - TMT = MAX(coil predictions) — hottest coil limits furnace
+   - Yield = MEAN(coil predictions) — average across coils
+   - Conversion = MEAN(coil predictions)
+   - Propylene = MEAN(coil predictions)
+   - Coking rate = MAX(coil predictions) — worst coil determines decoke timing
+4. Per-coil detail returned for coil-level analysis
+
+## Prediction Source Fallback Logic
+
+The system uses a dual-prediction architecture with automatic fallback:
+
+### When Active Model Exists (for that technology + feed_type):
+- **What-If**: `ModelBenchmark.predict_furnace()` computes both baseline and predicted values
+- **Fleet Overview**: `model_predicted` field populated with model-calculated current values
+- **Optimizer**: Active models passed to FleetOptimizer for model-based optimization
+- Response includes `prediction_source: "model"` and `algorithm: "Ridge"` (or whichever)
+
+### When No Active Model (fallback):
+- **What-If**: Sensitivity-based linear deltas applied (Δyield = sensitivity × ΔCOT)
+- **Fleet Overview**: `model_predicted` = null
+- **Optimizer**: Uses sensitivity coefficients from sensitivity_config table
+- Response includes `prediction_source: "sensitivity"` and `sensitivities_used: {...}`
+
+### Run Length (Always Sensitivity-Based)
+Run length is not a model target (not in simulation data). It always uses:
+```
+delta_run_days = (run_cot_sensitivity × delta_cot) + (run_shc_sensitivity × delta_shc / 0.01)
+```
 
 ## Excel Upload Template (2 sheets)
 ### Sheet 1: Furnace Data
@@ -198,26 +308,52 @@ Columns: timestamp, furnace_id, feed_rate, cot, shc, cop, cit, tmt_max, yield, c
 Columns: timestamp, c2_splitter_load_pct, cgc_suction_bar, cgc_power_mw, cgc_vhp_steam_tph
 
 ## API Endpoints
+
+### Data
 - POST /api/upload — parse Excel, validate, store snapshot
 - GET /api/upload/template — download Excel template
 - GET /api/snapshots — list uploads
 - GET /api/snapshots/latest — latest snapshot
-- GET /api/fleet?snapshot_id=latest — fleet overview
+
+### Fleet & Furnace
+- GET /api/fleet?upload_id=latest — fleet overview (includes `model_predicted` per furnace, `has_active_models` flag)
 - GET /api/furnace/{id} — furnace detail
-- POST /api/optimize — run FleetOptimizer
-- POST /api/whatif — single furnace simulation
-- GET/PUT /api/sensitivity — manage sensitivities
-- POST /api/train-model — train soft sensor from CSV
-- GET /api/models — model registry
-- PUT /api/models/{id}/activate — activate model
+- POST /api/optimize — run FleetOptimizer (model-aware when active models exist)
+- POST /api/whatif — single furnace simulation (returns `prediction_source`, `algorithm`)
+
+### ML Models & Training
+- GET /api/available-algorithms — returns list of installed algorithms (e.g. ["Ridge","RandomForest","GradientBoosting","XGBoost","LightGBM"])
+- POST /api/benchmark-models — upload CSV + select algorithms → benchmark comparison with recommendation (multipart form: file, technology, feed_type, algorithms JSON)
+- POST /api/train-model — train production model with chosen algorithm (multipart form: file, technology, feed_type, algorithm)
+- GET /api/models — model registry (all models with metrics, algorithm, is_active)
+- PUT /api/models/{id}/activate — activate model, extract & copy sensitivities to sensitivity_config
+
+### Configuration
+- GET/PUT /api/sensitivity — manage sensitivities (includes model-extracted values with source="model")
 - GET/PUT /api/config/economics — economic params
 - GET/PUT /api/config/constraints — constraint limits
 
 ## Frontend Pages
-1. Data Upload — drag-drop Excel, preview, validate, confirm
-2. Fleet Overview — furnace cards, ranking table, KPIs
-3. Furnace Detail — coil TMT heatmap, constraint panel
-4. What-If Simulator — COT/SHC sliders, predict yield/conv/run
-5. Feed Planning — optimizer with feed type, purity, delta feed inputs
-6. Sensitivity Manager — edit sensitivities, train models, model registry
-7. Settings — economic params, constraint limits
+1. **Data Upload** — drag-drop Excel, preview, validate, confirm
+2. **Fleet Overview** — furnace cards (with model_predicted overlay when available), ranking table, KPIs, `has_active_models` indicator
+3. **Furnace Detail** — coil TMT heatmap, constraint panel
+4. **What-If Simulator** — COT/SHC/feed sliders, predict yield/conv/run. Shows teal "Predicted by: {algorithm}" badge when model active, gray "Predicted by: Sensitivities" badge when using fallback
+5. **Feed Planning** — optimizer with feed type, purity, delta feed inputs
+6. **Sensitivity Manager** — two-step ML flow:
+   - **Step 1 (Benchmark)**: Select technology + feed type, upload simulation CSV, check algorithm boxes, click "Benchmark N Algorithms". Shows grid analysis badges, per-target comparison table (R², interpolation R², MAPE), composite scores, star recommendation with reason
+   - **Step 2 (Train & Activate)**: Algorithm dropdown (pre-filled with recommendation), "Train & Save" button, per-target training metrics table. Model registry table at bottom with Algorithm column, activate/deactivate buttons
+   - **Sensitivity table**: Edit sensitivities manually or see model-extracted values (source=model)
+7. **Settings** — economic params, constraint limits
+
+## Key Frontend Files Changed for ML Integration
+- `frontend/src/types/index.ts` — Added `BenchmarkTargetMetrics`, `BenchmarkAlgorithmResult`, `BenchmarkResponse`, `ModelPredicted` interfaces. Added `prediction_source`, `algorithm`, `model_predicted` fields to response types
+- `frontend/src/api/client.ts` — Added `benchmarkModels()`, `getAvailableAlgorithms()`, updated `trainModel()` with algorithm param
+- `frontend/src/pages/SensitivityManager.tsx` — Complete rewrite with two-step benchmark→train flow
+- `frontend/src/pages/WhatIfSimulator.tsx` — Added prediction source badge in results panel
+
+## Key Backend Files for ML Integration
+- `backend/app/engine/model_benchmark.py` — Core ML engine: `ModelBenchmark` class with `run_benchmark()`, `run_interpolation_test()`, `recommend()`, `train_production_model()`, `predict()`, `predict_furnace()`
+- `backend/app/services/training.py` — `benchmark_models()`, `train_model()`, `load_active_models()`, `predict_fleet_values()`, `_extract_sensitivities_from_model_dict()`
+- `backend/app/services/optimizer.py` — `run_whatif()` with model-based prediction fallback, `run_optimizer()` with active model loading
+- `backend/app/routers/training.py` — `/api/benchmark-models`, `/api/available-algorithms`, `/api/train-model` endpoints
+- `backend/app/routers/fleet.py` — Fleet overview enriched with `model_predicted` values per furnace
