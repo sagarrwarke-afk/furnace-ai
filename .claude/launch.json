@@ -2,15 +2,20 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "backend",
+      "runtimeExecutable": "C:/Program Files/Python313/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--app-dir", "backend", "--reload", "--host", "0.0.0.0", "--port", "8000"],
+      "port": 8000
+    },
+    {
       "name": "frontend",
       "runtimeExecutable": "C:/Program Files/nodejs/node.exe",
       "runtimeArgs": [
-        "frontend/node_modules/vite/bin/vite.js",
-        "preview",
-        "--outDir", "frontend/dist",
+        "D:/furnace-ai/frontend/node_modules/vite/bin/vite.js",
+        "D:/furnace-ai/frontend",
         "--host"
       ],
-      "port": 4173,
+      "port": 5173,
       "autoPort": true
     }
   ]
