@@ -19,7 +19,7 @@ import type {
 } from '../types'
 
 const api = axios.create({
-  baseURL: 'http://localhost:8001',
+  baseURL: 'http://localhost:8003',
   timeout: 60000,
 })
 
