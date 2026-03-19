@@ -75,6 +75,7 @@ class CoilSnapshot(Base):
     cop = Column(Numeric(6, 2))
     cit = Column(Numeric(6, 2))
     thickness = Column(Numeric(6, 3))
+    coking_rate = Column(Numeric(8, 4))
     delta_hours = Column(Numeric(8, 2))
 
 
