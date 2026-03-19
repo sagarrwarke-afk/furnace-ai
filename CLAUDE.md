@@ -56,7 +56,8 @@ furnace-ai/
 │   │   └── App.tsx
 │   ├── package.json
 │   └── Dockerfile
-├── init.sql                  # Database schema + seed data
+├── init.sql                  # Database schema + seed data (includes coil_snapshot)
+├── seed_data_reference.csv   # Reference CSV with per-coil data (64 rows)
 └── docker-compose.yml
 ```
 
@@ -170,8 +171,9 @@ AF-01 ↓COT -0.5°C | AF-04 ↓COT -3.0°C | Fleet Profit +$1.211M/yr
 - Cost: +$0.043M/yr
 
 ## Database Tables
-### Input (from Excel upload)
+### Input (from CSV/Excel upload)
 - furnace_snapshot: per-furnace operating data at a timestamp
+- coil_snapshot: per-coil X variables (feed, cot, shc, cop, cit, thickness, coking_rate, delta_hours) — 8 coils per furnace
 - downstream_status: C2 splitter, CGC data
 - feed_composition: per-furnace feed analysis
 - upload_history: tracks every Excel upload
@@ -266,17 +268,46 @@ Model-derived sensitivities are computed by feeding perturbed inputs:
 
 ## Per-Coil Prediction Architecture
 
-Simulation data is per-coil (each coil has its own thickness), so furnace-level predictions use per-coil aggregation:
+Each coil has its own independent X variables (feed, COT, SHC, COP, CIT, thickness, coking_rate) stored in `coil_snapshot` table. This enables true per-coil soft sensor prediction.
 
-1. `feed_per_coil = furnace_feed_rate / num_coils`
-2. For each coil: predict with that coil's thickness (8 coils typical)
-3. Aggregate across coils:
-   - TMT = MAX(coil predictions) — hottest coil limits furnace
-   - Yield = MEAN(coil predictions) — average across coils
-   - Conversion = MEAN(coil predictions)
-   - Propylene = MEAN(coil predictions)
-   - Coking rate = MAX(coil predictions) — worst coil determines decoke timing
-4. Per-coil detail returned for coil-level analysis
+### Two-Step Thickness + Prediction (per coil)
+1. **Step 1 — Thickness evolution from measured coking_rate**:
+   ```
+   new_thickness = csv_thickness + coking_factor × csv_coking_rate × (delta_hours / 720)
+   ```
+   - `csv_coking_rate`: measured coking rate from uploaded CSV (mm/month)
+   - `coking_factor`: technology-specific multiplier (from `sensitivity_config`)
+   - `delta_hours`: time since last measurement (from CSV)
+   - `720` = hours per month (30 days × 24 hours)
+
+2. **Step 2 — ML prediction with computed thickness**:
+   All 5 targets predicted using `new_thickness` + other per-coil X variables:
+   → yield_c2h4, tmt, coking_rate (model-predicted), conversion, propylene
+
+### Coking Factors (stored in sensitivity_config)
+| Technology | Feed Type | Factor |
+|-----------|-----------|--------|
+| Lummus | Ethane | 0.315 |
+| Lummus | Propane | 0.71 |
+| Technip | Ethane | 0.9 |
+| Technip | Propane | 0.9 |
+
+### Per-Coil Aggregation
+- TMT = MAX(coil predictions) — hottest coil limits furnace
+- Yield = MEAN(coil predictions) — average across coils
+- Conversion = MEAN(coil predictions)
+- Propylene = MEAN(coil predictions)
+- Coking rate = MAX(coil predictions) — worst coil determines decoke timing
+
+### Example (AF-01 Coil 1, Lummus Ethane)
+```
+Step 1: new_thickness = 2.1 + 0.315 × 11 × (24/720) = 2.1 + 0.1155 = 2.2155 mm
+Step 2: ML.predict(feed=6.75, cot=839.2, shc=0.331, cop=1.3, cit=650, thickness=2.2155, ...)
+        → yield, tmt, coking_rate, conversion, propylene
+```
+
+### Legacy Fallback
+If no `coil_snapshot` rows exist (legacy Excel upload), the system builds uniform per-coil data from `furnace_snapshot` with `coke_thickness_1..8` columns and `delta_hours=0` (no thickness evolution).
 
 ## Prediction Source Fallback Logic
 
@@ -300,7 +331,14 @@ Run length is not a model target (not in simulation data). It always uses:
 delta_run_days = (run_cot_sensitivity × delta_cot) + (run_shc_sensitivity × delta_shc / 0.01)
 ```
 
-## Excel Upload Template (2 sheets)
+## Upload Format (CSV with per-coil rows)
+Each furnace has 8 rows (one per coil) with per-coil X variables:
+
+Columns: furnace_id, coil, feed, cot, shc, cop, cit, thickness, delta_hours, coking_rate, tmt_max, yield, conversion, propylene, feed_valve_pct, fgv_pct, damper_pct, sec, run_days_elapsed, run_days_total, status, feed_ethane_pct, feed_propane_pct
+
+Reference file: `seed_data_reference.csv` (64 rows = 8 furnaces × 8 coils)
+
+### Legacy Excel Upload (still supported)
 ### Sheet 1: Furnace Data
 Columns: timestamp, furnace_id, feed_rate, cot, shc, cop, cit, tmt_max, yield, conversion, coking_rate, propylene, feed_valve_pct, fgv_pct, damper_pct, sec, run_days_elapsed, run_days_total, status, feed_ethane_pct, feed_propane_pct, coke_thickness_1..8
 
@@ -352,8 +390,10 @@ Columns: timestamp, c2_splitter_load_pct, cgc_suction_bar, cgc_power_mw, cgc_vhp
 - `frontend/src/pages/WhatIfSimulator.tsx` — Added prediction source badge in results panel
 
 ## Key Backend Files for ML Integration
-- `backend/app/engine/model_benchmark.py` — Core ML engine: `ModelBenchmark` class with `run_benchmark()`, `run_interpolation_test()`, `recommend()`, `train_production_model()`, `predict()`, `predict_furnace()`
-- `backend/app/services/training.py` — `benchmark_models()`, `train_model()`, `load_active_models()`, `predict_fleet_values()`, `_extract_sensitivities_from_model_dict()`
+- `backend/app/engine/model_benchmark.py` — Core ML engine: `ModelBenchmark` class with `run_benchmark()`, `run_interpolation_test()`, `recommend()`, `train_production_model()`, `predict()`, `predict_furnace()` (two-step: CSV coking_rate → thickness → ML predict)
+- `backend/app/services/training.py` — `benchmark_models()`, `train_model()`, `load_active_models()`, `predict_fleet_values()`, `predict_single_furnace()`, `_load_coil_data()`, `_coil_data_or_legacy()`, `_get_coking_factor()`
 - `backend/app/services/optimizer.py` — `run_whatif()` with model-based prediction fallback, `run_optimizer()` with active model loading
 - `backend/app/routers/training.py` — `/api/benchmark-models`, `/api/available-algorithms`, `/api/train-model` endpoints
 - `backend/app/routers/fleet.py` — Fleet overview enriched with `model_predicted` values per furnace
+- `backend/app/routers/upload.py` — CSV upload parser with per-coil `coil_snapshot` creation
+- `backend/app/models/furnace.py` — ORM models including `CoilSnapshot` (feed, cot, shc, cop, cit, thickness, coking_rate, delta_hours)
