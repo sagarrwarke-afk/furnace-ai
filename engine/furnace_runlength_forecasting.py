@@ -946,25 +946,23 @@ class FleetOptimizer:
             else:
                 # Fallback: composition-adjusted sensitivities
                 s = self.get_sens(f)  # uses user-input purity via interpolation
-                base_yield = f['yield']
-                base_prop = f.get('prop_yld', 0)
-                # Composition delta from furnace's stored composition vs user input
                 base_eth = f.get('feed_ethane_pct', 97.0 if f['feed'] == 'Ethane' else 8.0)
-                comp_delta_eth = eth_pct - base_eth
+                # Both baseline and optimized use same composition adjustment
+                # so composition delta cancels out — only COT/SHC deltas produce gains
+                base_yield = self.composition_adjusted_yield(f['yield'], base_eth, eth_pct, 0, s)
+                base_prop = self.composition_adjusted_propylene(f.get('prop_yld', 0), base_eth, eth_pct, 0, s)
                 oY = self.composition_adjusted_yield(f['yield'], base_eth, eth_pct, a['dc'], s)
                 oP = self.composition_adjusted_propylene(f.get('prop_yld', 0), base_eth, eth_pct, a['dc'], s)
-                # Adjust baseline too for composition effect
-                s_base = self.get_sens(f, base_eth)
-                base_yield = f['yield']  # baseline is at stored composition
-                base_prop = f.get('prop_yld', 0)
 
-            oSec = f.get('sec', 14) + a['dc'] * 0.02 - a['ds'] * 5
+            base_eth = f.get('feed_ethane_pct', 97.0 if f['feed'] == 'Ethane' else 8.0)
+            base_sec = self.composition_adjusted_sec(f.get('sec', 14), base_eth, eth_pct, 0, 0)
+            oSec = self.composition_adjusted_sec(f.get('sec', 14), base_eth, eth_pct, a['dc'], a['ds'])
             s = self.get_sens(f)
             oR = max(30, round(f.get('runTotal', 120) + a['dc'] * s['run_cot']
                                + (a['ds'] * 100) * s['run_shc']))
 
             base = self.econ.calc_furnace_economics(
-                f['fr'], base_yield, base_prop, f.get('sec', 14),
+                f['fr'], base_yield, base_prop, base_sec,
                 f.get('runTotal', 120), f['feed'])
             opt = self.econ.calc_furnace_economics(
                 a['optFeed'], oY, oP, oSec, oR, f['feed'])
