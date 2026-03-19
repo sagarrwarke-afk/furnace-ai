@@ -478,11 +478,11 @@ class ModelBenchmark:
             {"coil": 1, "feed": 6.75, "cot": 838, "shc": 0.33,
              "cop": 26.5, "cit": 140, "thickness": 2.1}
 
-        Two-pass thickness calculation (when delta_hours > 0):
-        1. Pass 1: predict coking_rate per coil using prev_thickness
-        2. Compute: current_thickness = prev_thickness + coking_factor * coking_rate * (delta_hours / 720)
-           coking_rate in mm/month, coking_factor is technology-specific (from sensitivity_config)
-        3. Pass 2: predict all targets using current_thickness
+        Two-step thickness + prediction (when delta_hours > 0):
+        1. Compute thickness from CSV's measured coking_rate:
+           current_thickness = prev_thickness + coking_factor * csv_coking_rate * (delta_hours / 720)
+           csv_coking_rate in mm/month, coking_factor is technology-specific
+        2. Predict all 5 targets using current_thickness via ML model
 
         Aggregation: tmt/coking_rate=MAX, yield/conversion/propylene=MEAN.
 
@@ -519,28 +519,15 @@ class ModelBenchmark:
 
             effective_thick = prev_thick
 
-            if delta_hours > 0:
-                # Pass 1: predict coking_rate using prev_thickness
-                raw_pass1 = {
-                    "feed": coil_feed,
-                    "cot": coil_cot,
-                    "shc": coil_shc,
-                    "cop": coil_cop,
-                    "cit": coil_cit,
-                    "thickness": prev_thick,
-                    "feed_ethane_pct": feed_ethane_pct,
-                    "feed_propane_pct": feed_propane_pct,
-                }
-                pass1_pred = ModelBenchmark.predict(model_dict, raw_pass1)
-                predicted_coking = pass1_pred.get("coking_rate", 0.0) or 0.0
-
-                # Compute current thickness
+            # Step 1: Compute thickness from CSV's measured coking_rate
+            measured_coking = cd.get("coking_rate", 0.0) or 0.0
+            if delta_hours > 0 and measured_coking > 0:
                 # coking_rate units: mm/month, delta_hours in hours
                 # 1 month ≈ 30 days = 720 hours
                 HOURS_PER_MONTH = 720.0
-                effective_thick = prev_thick + coking_factor * predicted_coking * (delta_hours / HOURS_PER_MONTH)
+                effective_thick = prev_thick + coking_factor * measured_coking * (delta_hours / HOURS_PER_MONTH)
 
-            # Pass 2 (or single pass): predict all targets with effective thickness
+            # Step 2: Predict all 5 targets with computed thickness via ML model
             raw = {
                 "feed": coil_feed,
                 "cot": coil_cot,

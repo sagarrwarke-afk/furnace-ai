@@ -471,6 +471,7 @@ def _load_coil_data(
             "cop": float(r.cop or 0),
             "cit": float(r.cit or 0),
             "thickness": float(r.thickness or 0),
+            "coking_rate": float(r.coking_rate or 0),
             "delta_hours": float(r.delta_hours or 0),
         }
         for r in rows

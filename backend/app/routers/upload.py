@@ -147,6 +147,7 @@ def _upload_per_coil(
                 cop=_num_row(row, "cop"),
                 cit=_num_row(row, "cit"),
                 thickness=_num_row(row, "thickness"),
+                coking_rate=_num_row(row, "coking_rate"),
                 delta_hours=_num_row(row, "delta_hours"),
             )
             db.add(coil)
