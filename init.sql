@@ -16,6 +16,7 @@ DROP TABLE IF EXISTS sensitivity_config CASCADE;
 DROP TABLE IF EXISTS furnace_config CASCADE;
 DROP TABLE IF EXISTS feed_composition CASCADE;
 DROP TABLE IF EXISTS downstream_status CASCADE;
+DROP TABLE IF EXISTS coil_snapshot CASCADE;
 DROP TABLE IF EXISTS furnace_snapshot CASCADE;
 DROP TABLE IF EXISTS upload_history CASCADE;
 
@@ -71,6 +72,25 @@ CREATE TABLE furnace_snapshot (
 CREATE INDEX idx_snapshot_upload ON furnace_snapshot(upload_id);
 CREATE INDEX idx_snapshot_ts ON furnace_snapshot(snapshot_ts);
 CREATE INDEX idx_snapshot_furnace ON furnace_snapshot(furnace_id);
+
+CREATE TABLE coil_snapshot (
+    id              SERIAL PRIMARY KEY,
+    upload_id       INTEGER NOT NULL REFERENCES upload_history(id) ON DELETE CASCADE,
+    snapshot_ts     TIMESTAMPTZ NOT NULL,
+    furnace_id      VARCHAR(10) NOT NULL,
+    coil_number     SMALLINT NOT NULL,
+    feed            NUMERIC(8,3),
+    cot             NUMERIC(6,2),
+    shc             NUMERIC(5,3),
+    cop             NUMERIC(6,2),
+    cit             NUMERIC(6,2),
+    thickness       NUMERIC(6,3),
+    coking_rate     NUMERIC(8,4),           -- measured coking rate (mm/month)
+    delta_hours     NUMERIC(8,2)
+);
+
+CREATE INDEX idx_coil_snap_upload ON coil_snapshot(upload_id);
+CREATE INDEX idx_coil_snap_furnace ON coil_snapshot(furnace_id);
 
 CREATE TABLE downstream_status (
     id                      SERIAL PRIMARY KEY,
@@ -296,6 +316,17 @@ VALUES
     ('ALL', 'ALL', 'coking_rate', 'per_ethane_pct',  0.080, 'rate/%ethane',   'manual');
 
 -- ---------------------------------------------------------------------------
+-- Coking Factors for Thickness Evolution (dimensionless multiplier)
+-- effective_thickness = prev + coking_factor * predicted_coking_rate * (delta_hours / 720)
+-- ---------------------------------------------------------------------------
+INSERT INTO sensitivity_config (technology, feed_type, parameter, sensitivity_type, value, unit, source)
+VALUES
+    ('Lummus',  'Ethane',  'coking_factor', 'thickness_evolution', 0.3150, 'dimensionless', 'manual'),
+    ('Lummus',  'Propane', 'coking_factor', 'thickness_evolution', 0.7100, 'dimensionless', 'manual'),
+    ('Technip', 'Ethane',  'coking_factor', 'thickness_evolution', 0.9000, 'dimensionless', 'manual'),
+    ('Technip', 'Propane', 'coking_factor', 'thickness_evolution', 0.9000, 'dimensionless', 'manual');
+
+-- ---------------------------------------------------------------------------
 -- Economic Parameters
 -- ---------------------------------------------------------------------------
 INSERT INTO economic_params (param_name, value, unit)
@@ -350,7 +381,7 @@ INSERT INTO furnace_snapshot (
 VALUES
     -- AF-01: Lummus Ethane, online (protect) — runDays=45 < 60
     (1, NOW(), 'AF-01',
-     54.00, 838.00, 0.330, 26.50, 140.00,
+     54.00, 838.00, 0.330, 1.30, 650.00,
      1058.0, 49.20, 64.80, 1.200, 1.80,
      72.00, 72.00, 70.00, 3.200,
      45, 180, 'online (protect)',
@@ -359,7 +390,7 @@ VALUES
 
     -- AF-02: Lummus Ethane, online (healthy)
     (1, NOW(), 'AF-02',
-     56.00, 835.00, 0.320, 26.00, 138.00,
+     56.00, 835.00, 0.320, 1.30, 650.00,
      1045.0, 48.80, 63.50, 1.100, 1.90,
      74.00, 68.00, 68.00, 3.150,
      62, 200, 'online (healthy)',
@@ -368,7 +399,7 @@ VALUES
 
     -- AF-03: Lummus Propane, online (healthy)
     (1, NOW(), 'AF-03',
-     76.00, 830.00, 0.350, 25.50, 135.00,
+     76.00, 830.00, 0.350, 1.30, 650.00,
      1052.0, 29.10, 77.40, 0.800, 14.20,
      78.00, 65.00, 72.00, 3.500,
      89, 220, 'online (healthy)',
@@ -377,7 +408,7 @@ VALUES
 
     -- AF-04: Lummus Propane, online (protect) — runDays=28 < 60
     (1, NOW(), 'AF-04',
-     52.00, 842.00, 0.340, 27.00, 142.00,
+     52.00, 842.00, 0.340, 1.30, 650.00,
      1068.0, 31.50, 82.00, 1.500, 13.50,
      65.00, 78.00, 75.00, 3.600,
      28, 150, 'online (protect)',
@@ -395,7 +426,7 @@ VALUES
 
     -- AF-06: Lummus Propane, online (healthy)
     (1, NOW(), 'AF-06',
-     68.00, 832.00, 0.350, 25.80, 136.00,
+     68.00, 832.00, 0.350, 1.30, 650.00,
      1048.0, 29.80, 78.20, 0.750, 14.00,
      76.00, 66.00, 71.00, 3.450,
      95, 230, 'online (healthy)',
@@ -404,7 +435,7 @@ VALUES
 
     -- AF-07: Lummus Propane, online (healthy)
     (1, NOW(), 'AF-07',
-     72.00, 828.00, 0.360, 25.20, 134.00,
+     72.00, 828.00, 0.360, 1.30, 650.00,
      1040.0, 28.50, 76.00, 0.700, 13.80,
      80.00, 60.00, 69.00, 3.400,
      110, 240, 'online (healthy)',
@@ -413,12 +444,101 @@ VALUES
 
     -- AF-08: Technip Ethane, online (healthy)
     (1, NOW(), 'AF-08',
-     30.00, 830.00, 0.320, 24.00, 130.00,
+     30.00, 830.00, 0.320, 1.30, 650.00,
      1010.0, 34.20, 64.00, 0.600, 2.50,
      60.00, 58.00, 62.00, 3.100,
      120, 250, 'online (healthy)',
      98.570, 1.430,
      1.00, 1.10, 1.05, 1.15, 1.08, 1.02, 1.07, 0.98);
+
+-- ---------------------------------------------------------------------------
+-- Seed Coil Snapshots (per-coil X variables, 8 coils per furnace)
+-- Per-coil COT/SHC/COP/CIT vary slightly across coils (radiant section position)
+-- Thickness from existing seed data, delta_hours=24 (daily upload)
+-- Feed = furnace_feed_rate / 8
+-- ---------------------------------------------------------------------------
+INSERT INTO coil_snapshot (upload_id, snapshot_ts, furnace_id, coil_number,
+    feed, cot, shc, cop, cit, thickness, coking_rate, delta_hours)
+VALUES
+    -- AF-01: Lummus Ethane, feed=54 t/hr → 6.75/coil, COT=838 base
+    (1, NOW(), 'AF-01', 1, 6.750, 839.2, 0.331, 1.30, 650.0, 2.10, 11.0, 24.0),
+    (1, NOW(), 'AF-01', 2, 6.750, 837.5, 0.329, 1.30, 650.0, 2.20, 21.0, 24.0),
+    (1, NOW(), 'AF-01', 3, 6.750, 838.8, 0.332, 1.30, 650.0, 2.15, 13.0, 24.0),
+    (1, NOW(), 'AF-01', 4, 6.750, 836.0, 0.328, 1.30, 650.0, 2.30, 20.0, 24.0),
+    (1, NOW(), 'AF-01', 5, 6.750, 838.0, 0.330, 1.30, 650.0, 2.25, 18.0, 24.0),
+    (1, NOW(), 'AF-01', 6, 6.750, 839.5, 0.333, 1.30, 650.0, 2.18, 15.0, 24.0),
+    (1, NOW(), 'AF-01', 7, 6.750, 837.0, 0.329, 1.30, 650.0, 2.22, 22.0, 24.0),
+    (1, NOW(), 'AF-01', 8, 6.750, 838.5, 0.331, 1.30, 650.0, 2.12, 12.0, 24.0),
+
+    -- AF-02: Lummus Ethane, feed=56 t/hr → 7.0/coil, COT=835 base
+    (1, NOW(), 'AF-02', 1, 7.000, 836.2, 0.321, 1.30, 650.0, 1.80, 17.0, 24.0),
+    (1, NOW(), 'AF-02', 2, 7.000, 834.5, 0.319, 1.30, 650.0, 1.90, 12.0, 24.0),
+    (1, NOW(), 'AF-02', 3, 7.000, 835.8, 0.322, 1.30, 650.0, 1.85, 22.0, 24.0),
+    (1, NOW(), 'AF-02', 4, 7.000, 833.5, 0.318, 1.30, 650.0, 1.95, 24.0, 24.0),
+    (1, NOW(), 'AF-02', 5, 7.000, 835.0, 0.320, 1.30, 650.0, 1.88, 20.0, 24.0),
+    (1, NOW(), 'AF-02', 6, 7.000, 836.5, 0.323, 1.30, 650.0, 1.82, 24.0, 24.0),
+    (1, NOW(), 'AF-02', 7, 7.000, 834.0, 0.319, 1.30, 650.0, 1.87, 18.0, 24.0),
+    (1, NOW(), 'AF-02', 8, 7.000, 835.5, 0.321, 1.30, 650.0, 1.79, 16.0, 24.0),
+
+    -- AF-03: Lummus Propane, feed=76 t/hr → 9.5/coil, COT=830 base
+    (1, NOW(), 'AF-03', 1, 9.500, 831.2, 0.351, 1.30, 650.0, 1.50, 22.0, 24.0),
+    (1, NOW(), 'AF-03', 2, 9.500, 829.5, 0.349, 1.30, 650.0, 1.60, 13.0, 24.0),
+    (1, NOW(), 'AF-03', 3, 9.500, 830.8, 0.352, 1.30, 650.0, 1.55, 11.0, 24.0),
+    (1, NOW(), 'AF-03', 4, 9.500, 828.5, 0.348, 1.30, 650.0, 1.65, 18.0, 24.0),
+    (1, NOW(), 'AF-03', 5, 9.500, 830.0, 0.350, 1.30, 650.0, 1.58, 25.0, 24.0),
+    (1, NOW(), 'AF-03', 6, 9.500, 831.5, 0.353, 1.30, 650.0, 1.52, 16.0, 24.0),
+    (1, NOW(), 'AF-03', 7, 9.500, 829.0, 0.349, 1.30, 650.0, 1.57, 17.0, 24.0),
+    (1, NOW(), 'AF-03', 8, 9.500, 830.5, 0.351, 1.30, 650.0, 1.48, 11.0, 24.0),
+
+    -- AF-04: Lummus Propane, feed=52 t/hr → 6.5/coil, COT=842 base
+    (1, NOW(), 'AF-04', 1, 6.500, 843.2, 0.341, 1.30, 650.0, 2.80, 19.0, 24.0),
+    (1, NOW(), 'AF-04', 2, 6.500, 841.5, 0.339, 1.30, 650.0, 2.90, 12.0, 24.0),
+    (1, NOW(), 'AF-04', 3, 6.500, 842.8, 0.342, 1.30, 650.0, 2.85, 19.0, 24.0),
+    (1, NOW(), 'AF-04', 4, 6.500, 840.5, 0.338, 1.30, 650.0, 3.00, 11.0, 24.0),
+    (1, NOW(), 'AF-04', 5, 6.500, 842.0, 0.340, 1.30, 650.0, 2.95, 11.0, 24.0),
+    (1, NOW(), 'AF-04', 6, 6.500, 843.5, 0.343, 1.30, 650.0, 2.82, 21.0, 24.0),
+    (1, NOW(), 'AF-04', 7, 6.500, 841.0, 0.339, 1.30, 650.0, 2.88, 24.0, 24.0),
+    (1, NOW(), 'AF-04', 8, 6.500, 842.5, 0.341, 1.30, 650.0, 2.78, 18.0, 24.0),
+
+    -- AF-05: Lummus Propane, decoke (all zeros)
+    (1, NOW(), 'AF-05', 1, 0.000, 0.00, 0.000, 0.00, 0.0, 0.00, 0.0, 0.0),
+    (1, NOW(), 'AF-05', 2, 0.000, 0.00, 0.000, 0.00, 0.0, 0.00, 0.0, 0.0),
+    (1, NOW(), 'AF-05', 3, 0.000, 0.00, 0.000, 0.00, 0.0, 0.00, 0.0, 0.0),
+    (1, NOW(), 'AF-05', 4, 0.000, 0.00, 0.000, 0.00, 0.0, 0.00, 0.0, 0.0),
+    (1, NOW(), 'AF-05', 5, 0.000, 0.00, 0.000, 0.00, 0.0, 0.00, 0.0, 0.0),
+    (1, NOW(), 'AF-05', 6, 0.000, 0.00, 0.000, 0.00, 0.0, 0.00, 0.0, 0.0),
+    (1, NOW(), 'AF-05', 7, 0.000, 0.00, 0.000, 0.00, 0.0, 0.00, 0.0, 0.0),
+    (1, NOW(), 'AF-05', 8, 0.000, 0.00, 0.000, 0.00, 0.0, 0.00, 0.0, 0.0),
+
+    -- AF-06: Lummus Propane, feed=68 t/hr → 8.5/coil, COT=832 base
+    (1, NOW(), 'AF-06', 1, 8.500, 833.2, 0.351, 1.30, 650.0, 1.40, 15.0, 24.0),
+    (1, NOW(), 'AF-06', 2, 8.500, 831.5, 0.349, 1.30, 650.0, 1.50, 24.0, 24.0),
+    (1, NOW(), 'AF-06', 3, 8.500, 832.8, 0.352, 1.30, 650.0, 1.45, 22.0, 24.0),
+    (1, NOW(), 'AF-06', 4, 8.500, 830.5, 0.348, 1.30, 650.0, 1.55, 11.0, 24.0),
+    (1, NOW(), 'AF-06', 5, 8.500, 832.0, 0.350, 1.30, 650.0, 1.48, 20.0, 24.0),
+    (1, NOW(), 'AF-06', 6, 8.500, 833.5, 0.353, 1.30, 650.0, 1.42, 21.0, 24.0),
+    (1, NOW(), 'AF-06', 7, 8.500, 831.0, 0.349, 1.30, 650.0, 1.47, 19.0, 24.0),
+    (1, NOW(), 'AF-06', 8, 8.500, 832.5, 0.351, 1.30, 650.0, 1.38, 21.0, 24.0),
+
+    -- AF-07: Lummus Propane, feed=72 t/hr → 9.0/coil, COT=828 base
+    (1, NOW(), 'AF-07', 1, 9.000, 829.2, 0.361, 1.30, 650.0, 1.20, 18.0, 24.0),
+    (1, NOW(), 'AF-07', 2, 9.000, 827.5, 0.359, 1.30, 650.0, 1.30, 21.0, 24.0),
+    (1, NOW(), 'AF-07', 3, 9.000, 828.8, 0.362, 1.30, 650.0, 1.25, 17.0, 24.0),
+    (1, NOW(), 'AF-07', 4, 9.000, 826.5, 0.358, 1.30, 650.0, 1.35, 13.0, 24.0),
+    (1, NOW(), 'AF-07', 5, 9.000, 828.0, 0.360, 1.30, 650.0, 1.28, 11.0, 24.0),
+    (1, NOW(), 'AF-07', 6, 9.000, 829.5, 0.363, 1.30, 650.0, 1.22, 12.0, 24.0),
+    (1, NOW(), 'AF-07', 7, 9.000, 827.0, 0.359, 1.30, 650.0, 1.27, 12.0, 24.0),
+    (1, NOW(), 'AF-07', 8, 9.000, 828.5, 0.361, 1.30, 650.0, 1.18, 25.0, 24.0),
+
+    -- AF-08: Technip Ethane, feed=30 t/hr → 3.75/coil, COT=830 base
+    (1, NOW(), 'AF-08', 1, 3.750, 831.2, 0.321, 1.30, 650.0, 1.00, 19.0, 24.0),
+    (1, NOW(), 'AF-08', 2, 3.750, 829.5, 0.319, 1.30, 650.0, 1.10, 15.0, 24.0),
+    (1, NOW(), 'AF-08', 3, 3.750, 830.8, 0.322, 1.30, 650.0, 1.05, 19.0, 24.0),
+    (1, NOW(), 'AF-08', 4, 3.750, 828.5, 0.318, 1.30, 650.0, 1.15, 19.0, 24.0),
+    (1, NOW(), 'AF-08', 5, 3.750, 830.0, 0.320, 1.30, 650.0, 1.08, 14.0, 24.0),
+    (1, NOW(), 'AF-08', 6, 3.750, 831.5, 0.323, 1.30, 650.0, 1.02, 11.0, 24.0),
+    (1, NOW(), 'AF-08', 7, 3.750, 829.0, 0.319, 1.30, 650.0, 1.07, 24.0, 24.0),
+    (1, NOW(), 'AF-08', 8, 3.750, 830.5, 0.321, 1.30, 650.0, 0.98, 21.0, 24.0);
 
 -- ---------------------------------------------------------------------------
 -- Seed Downstream Status

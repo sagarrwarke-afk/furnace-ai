@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { getEconomics, updateEconomics, getConstraints, updateConstraints } from '../api/client'
-import type { EconomicParamItem, ConstraintItem } from '../types'
+// Types EconomicParamItem, ConstraintItem available from '../types' if needed
 
 const ECON_LABELS: Record<string, string> = {
   ethylene_price: 'Ethylene Price',

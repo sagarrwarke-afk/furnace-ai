@@ -20,7 +20,7 @@ from app.engine.model_benchmark import (
     BASE_FEATURES,
     TARGETS,
 )
-from app.models.furnace import ModelRegistry, SensitivityConfig, AuditLog, FurnaceConfig
+from app.models.furnace import ModelRegistry, SensitivityConfig, AuditLog, FurnaceConfig, CoilSnapshot
 
 
 # Targets we extract sensitivities for
@@ -442,8 +442,95 @@ def load_active_models(db: Session) -> dict[tuple[str, str], dict]:
 
 
 # ---------------------------------------------------------------------------
+# Load per-coil data from DB
+# ---------------------------------------------------------------------------
+
+def _load_coil_data(
+    db: Session, upload_id: int, furnace_id: str,
+) -> list[dict]:
+    """
+    Load per-coil X variables from coil_snapshot table.
+    Returns list of dicts with keys: coil, feed, cot, shc, cop, cit, thickness, delta_hours.
+    Returns empty list if no coil data exists (legacy upload).
+    """
+    rows = (
+        db.query(CoilSnapshot)
+        .filter(
+            CoilSnapshot.upload_id == upload_id,
+            CoilSnapshot.furnace_id == furnace_id,
+        )
+        .order_by(CoilSnapshot.coil_number)
+        .all()
+    )
+    return [
+        {
+            "coil": r.coil_number,
+            "feed": float(r.feed or 0),
+            "cot": float(r.cot or 0),
+            "shc": float(r.shc or 0),
+            "cop": float(r.cop or 0),
+            "cit": float(r.cit or 0),
+            "thickness": float(r.thickness or 0),
+            "coking_rate": float(r.coking_rate or 0),
+            "delta_hours": float(r.delta_hours or 0),
+        }
+        for r in rows
+    ]
+
+
+def _coil_data_or_legacy(
+    db: Session, upload_id: int, snap, num_coils: int,
+) -> tuple[list[dict], float]:
+    """
+    Try loading per-coil data from coil_snapshot. If none exists (legacy upload),
+    build coil_data from furnace snapshot with uniform X variables.
+    Returns (coil_data, delta_hours).
+    """
+    coil_data = _load_coil_data(db, upload_id, snap.furnace_id)
+    if coil_data:
+        # Use max delta_hours across coils (should be same for all)
+        delta_hours = max(cd.get("delta_hours", 0) for cd in coil_data)
+        return coil_data, delta_hours
+
+    # Legacy fallback: uniform X variables, thickness from coke_thickness_1..8
+    feed_per_coil = float(snap.feed_rate or 0) / max(num_coils, 1)
+    thicknesses = [
+        float(snap.coke_thickness_1 or 0), float(snap.coke_thickness_2 or 0),
+        float(snap.coke_thickness_3 or 0), float(snap.coke_thickness_4 or 0),
+        float(snap.coke_thickness_5 or 0), float(snap.coke_thickness_6 or 0),
+        float(snap.coke_thickness_7 or 0), float(snap.coke_thickness_8 or 0),
+    ][:num_coils]
+
+    coil_data = []
+    for i, thick in enumerate(thicknesses):
+        coil_data.append({
+            "coil": i + 1,
+            "feed": feed_per_coil,
+            "cot": float(snap.cot or 0),
+            "shc": float(snap.shc or 0),
+            "cop": float(snap.cop or 0),
+            "cit": float(snap.cit or 0),
+            "thickness": thick,
+            "delta_hours": 0.0,
+        })
+    return coil_data, 0.0
+
+
+# ---------------------------------------------------------------------------
 # Predict fleet values (model-calculated actuals)
 # ---------------------------------------------------------------------------
+
+
+def _get_coking_factor(db: Session, technology: str, feed_type: str) -> float:
+    """Load coking factor from sensitivity_config table for thickness evolution."""
+    row = db.query(SensitivityConfig).filter(
+        SensitivityConfig.technology == technology,
+        SensitivityConfig.feed_type == feed_type,
+        SensitivityConfig.parameter == "coking_factor",
+        SensitivityConfig.sensitivity_type == "thickness_evolution",
+    ).first()
+    return float(row.value) if row else 1.0
+
 
 def predict_fleet_values(
     db: Session,
@@ -453,7 +540,7 @@ def predict_fleet_values(
 ) -> dict[str, dict]:
     """
     For each furnace, use active model to predict soft sensor values
-    from X inputs (feed, cot, shc, cop, cit, thickness, compositions).
+    from per-coil X inputs (feed, cot, shc, cop, cit, thickness, compositions).
 
     Returns {furnace_id: {yield_c2h4, tmt, coking_rate, conversion, propylene}}.
     """
@@ -483,29 +570,21 @@ def predict_fleet_values(
 
         model_dict = active_models[key]
 
-        # Get per-coil thicknesses
-        coil_thicknesses = [
-            float(s.coke_thickness_1 or 0), float(s.coke_thickness_2 or 0),
-            float(s.coke_thickness_3 or 0), float(s.coke_thickness_4 or 0),
-            float(s.coke_thickness_5 or 0), float(s.coke_thickness_6 or 0),
-            float(s.coke_thickness_7 or 0), float(s.coke_thickness_8 or 0),
-        ][:num_coils]
+        # Load per-coil data (or build from legacy snapshot)
+        coil_data, delta_hours = _coil_data_or_legacy(db, s.upload_id, s, num_coils)
+        coking_factor = _get_coking_factor(db, tech, feed_type)
 
         try:
             pred = ModelBenchmark.predict_furnace(
                 model_dict=model_dict,
-                furnace_feed_rate=float(s.feed_rate or 0),
-                cot=float(s.cot or 0),
-                shc=float(s.shc or 0),
-                cop=float(s.cop or 0),
-                cit=float(s.cit or 0),
+                coil_data=coil_data,
                 feed_ethane_pct=float(s.feed_ethane_pct or 0),
                 feed_propane_pct=float(s.feed_propane_pct or 0),
-                coil_thicknesses=coil_thicknesses,
-                num_coils=num_coils,
+                delta_hours=delta_hours,
+                coking_factor=coking_factor,
             )
             # Remove per_coil detail for fleet-level response
-            pred_summary = {k: v for k, v in pred.items() if k != "per_coil"}
+            pred_summary = {k: v for k, v in pred.items() if k not in ("per_coil", "computed_thicknesses")}
             pred_summary["algorithm"] = model_dict.get("algorithm", "Unknown")
             predictions[fid] = pred_summary
         except Exception:
@@ -545,25 +624,18 @@ def predict_single_furnace(
 
     model_dict = active_models[key]
 
-    coil_thicknesses = [
-        float(snap.coke_thickness_1 or 0), float(snap.coke_thickness_2 or 0),
-        float(snap.coke_thickness_3 or 0), float(snap.coke_thickness_4 or 0),
-        float(snap.coke_thickness_5 or 0), float(snap.coke_thickness_6 or 0),
-        float(snap.coke_thickness_7 or 0), float(snap.coke_thickness_8 or 0),
-    ][:num_coils]
+    # Load per-coil data (or build from legacy snapshot)
+    coil_data, delta_hours = _coil_data_or_legacy(db, snap.upload_id, snap, num_coils)
+    coking_factor = _get_coking_factor(db, tech, feed_type)
 
     try:
         pred = ModelBenchmark.predict_furnace(
             model_dict=model_dict,
-            furnace_feed_rate=float(snap.feed_rate or 0),
-            cot=float(snap.cot or 0),
-            shc=float(snap.shc or 0),
-            cop=float(snap.cop or 0),
-            cit=float(snap.cit or 0),
+            coil_data=coil_data,
             feed_ethane_pct=float(snap.feed_ethane_pct or 0),
             feed_propane_pct=float(snap.feed_propane_pct or 0),
-            coil_thicknesses=coil_thicknesses,
-            num_coils=num_coils,
+            delta_hours=delta_hours,
+            coking_factor=coking_factor,
         )
         pred["algorithm"] = model_dict.get("algorithm", "Unknown")
         return pred

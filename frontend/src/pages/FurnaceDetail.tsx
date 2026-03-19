@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getFurnaceDetail } from '../api/client'
-import type { FurnaceDetail, ConstraintStatus } from '../types'
+// Types imported from '../types' as needed
 
 const FURNACE_IDS = ['AF-01', 'AF-02', 'AF-03', 'AF-04', 'AF-05', 'AF-06', 'AF-07', 'AF-08']
 

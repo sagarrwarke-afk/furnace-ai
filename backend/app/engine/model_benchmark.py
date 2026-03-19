@@ -465,74 +465,94 @@ class ModelBenchmark:
     @staticmethod
     def predict_furnace(
         model_dict: dict,
-        furnace_feed_rate: float,
-        cot: float,
-        shc: float,
-        cop: float,
-        cit: float,
+        coil_data: list[dict],
         feed_ethane_pct: float,
         feed_propane_pct: float,
-        coil_thicknesses: list[float],
-        num_coils: int,
+        delta_hours: float = 0.0,
+        coking_factor: float = 1.0,
     ) -> dict[str, Any]:
         """
-        Per-coil furnace prediction.
+        Per-coil furnace prediction with true per-coil X variables.
 
-        Simulation data is per-coil, so:
-        1. feed_per_coil = furnace_feed_rate / num_coils
-        2. For each coil: predict with that coil's thickness
-        3. Aggregate: tmt=MAX, yield=MEAN, conversion=MEAN,
-                      propylene=MEAN, coking_rate=MAX
+        Each entry in coil_data has per-coil operating conditions:
+            {"coil": 1, "feed": 6.75, "cot": 838, "shc": 0.33,
+             "cop": 26.5, "cit": 140, "thickness": 2.1}
+
+        Two-step thickness + prediction (when delta_hours > 0):
+        1. Compute thickness from CSV's measured coking_rate:
+           current_thickness = prev_thickness + coking_factor * csv_coking_rate * (delta_hours / 720)
+           csv_coking_rate in mm/month, coking_factor is technology-specific
+        2. Predict all 5 targets using current_thickness via ML model
+
+        Aggregation: tmt/coking_rate=MAX, yield/conversion/propylene=MEAN.
 
         Returns:
             {
-                "yield_c2h4": float,   # furnace average
-                "tmt": float,          # furnace MAX
-                "coking_rate": float,  # furnace MAX
-                "conversion": float,   # furnace average
-                "propylene": float,    # furnace average
-                "per_coil": [          # per-coil detail
-                    {"coil": 1, "thickness": 0.67, "tmt": 1055, ...},
-                    ...
-                ]
+                "yield_c2h4": float,
+                "tmt": float,
+                "coking_rate": float,
+                "conversion": float,
+                "propylene": float,
+                "per_coil": [{coil, thickness, prev_thickness, computed_thickness, ...}],
+                "computed_thicknesses": [float],
             }
         """
-        if num_coils < 1:
-            num_coils = 1
+        if not coil_data:
+            return {"per_coil": []}
 
-        feed_per_coil = furnace_feed_rate / num_coils
-
-        # Pad or truncate thicknesses to match num_coils
-        thicknesses = list(coil_thicknesses)
-        while len(thicknesses) < num_coils:
-            thicknesses.append(thicknesses[-1] if thicknesses else 0.5)
-        thicknesses = thicknesses[:num_coils]
+        DEFAULT_THICKNESS = 0.2  # run-start default (mm)
 
         coil_preds = []
-        for i, thick in enumerate(thicknesses):
-            # Skip coils with zero thickness (use a small default)
-            effective_thick = thick if thick > 0.001 else 0.5
+        computed_thicknesses = []
 
+        for cd in coil_data:
+            coil_num = cd.get("coil", 1)
+            prev_thick = cd.get("thickness", 0.0)
+            if prev_thick is None or prev_thick <= 0.001:
+                prev_thick = DEFAULT_THICKNESS
+
+            coil_feed = cd.get("feed", 0.0) or 0.0
+            coil_cot = cd.get("cot", 0.0) or 0.0
+            coil_shc = cd.get("shc", 0.0) or 0.0
+            coil_cop = cd.get("cop", 0.0) or 0.0
+            coil_cit = cd.get("cit", 0.0) or 0.0
+
+            effective_thick = prev_thick
+
+            # Step 1: Compute thickness from CSV's measured coking_rate
+            measured_coking = cd.get("coking_rate", 0.0) or 0.0
+            if delta_hours > 0 and measured_coking > 0:
+                # coking_rate units: mm/month, delta_hours in hours
+                # 1 month ≈ 30 days = 720 hours
+                HOURS_PER_MONTH = 720.0
+                effective_thick = prev_thick + coking_factor * measured_coking * (delta_hours / HOURS_PER_MONTH)
+
+            # Step 2: Predict all 5 targets with computed thickness via ML model
             raw = {
-                "feed": feed_per_coil,
-                "cot": cot,
-                "shc": shc,
-                "cop": cop,
-                "cit": cit,
+                "feed": coil_feed,
+                "cot": coil_cot,
+                "shc": coil_shc,
+                "cop": coil_cop,
+                "cit": coil_cit,
                 "thickness": effective_thick,
                 "feed_ethane_pct": feed_ethane_pct,
                 "feed_propane_pct": feed_propane_pct,
             }
             pred = ModelBenchmark.predict(model_dict, raw)
-            pred["coil"] = i + 1
-            pred["thickness"] = effective_thick
+            pred["coil"] = coil_num
+            pred["thickness"] = round(effective_thick, 4)
+            pred["prev_thickness"] = round(prev_thick, 4)
+            pred["computed_thickness"] = round(effective_thick, 4)
+            pred["feed"] = coil_feed
+            pred["cot"] = coil_cot
+            pred["shc"] = coil_shc
+            pred["cop"] = coil_cop
+            pred["cit"] = coil_cit
             coil_preds.append(pred)
+            computed_thicknesses.append(round(effective_thick, 4))
 
         # Aggregate across coils
-        result = {"per_coil": coil_preds}
-
-        if not coil_preds:
-            return result
+        result = {"per_coil": coil_preds, "computed_thicknesses": computed_thicknesses}
 
         for target in TARGETS:
             vals = [cp.get(target) for cp in coil_preds if cp.get(target) is not None]
@@ -544,3 +564,50 @@ class ModelBenchmark:
                 result[target] = round(float(np.mean(vals)), 4)
 
         return result
+
+    @staticmethod
+    def predict_furnace_legacy(
+        model_dict: dict,
+        furnace_feed_rate: float,
+        cot: float,
+        shc: float,
+        cop: float,
+        cit: float,
+        feed_ethane_pct: float,
+        feed_propane_pct: float,
+        coil_thicknesses: list[float],
+        num_coils: int,
+    ) -> dict[str, Any]:
+        """
+        Legacy per-coil prediction (furnace-level X, only thickness varies).
+        Converts to coil_data format and delegates to predict_furnace().
+        """
+        if num_coils < 1:
+            num_coils = 1
+
+        feed_per_coil = furnace_feed_rate / num_coils
+
+        # Pad or truncate thicknesses
+        thicknesses = list(coil_thicknesses)
+        while len(thicknesses) < num_coils:
+            thicknesses.append(thicknesses[-1] if thicknesses else 0.2)
+        thicknesses = thicknesses[:num_coils]
+
+        coil_data = []
+        for i, thick in enumerate(thicknesses):
+            coil_data.append({
+                "coil": i + 1,
+                "feed": feed_per_coil,
+                "cot": cot,
+                "shc": shc,
+                "cop": cop,
+                "cit": cit,
+                "thickness": thick,
+            })
+
+        return ModelBenchmark.predict_furnace(
+            model_dict=model_dict,
+            coil_data=coil_data,
+            feed_ethane_pct=feed_ethane_pct,
+            feed_propane_pct=feed_propane_pct,
+        )

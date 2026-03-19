@@ -25,7 +25,7 @@ from app.engine.furnace_runlength_forecasting import (
     FleetOptimizer, EconomicGainsCalculator,
 )
 from app.engine.model_benchmark import ModelBenchmark
-from app.services.training import load_active_models
+from app.services.training import load_active_models, _coil_data_or_legacy, _get_coking_factor
 
 
 def _f(v) -> float:
@@ -337,13 +337,9 @@ def run_whatif(
     new_shc = base_shc + delta_shc
     new_feed = base_feed + delta_feed
 
-    # Per-coil thicknesses
-    coil_thicknesses = [
-        _f(snap.coke_thickness_1), _f(snap.coke_thickness_2),
-        _f(snap.coke_thickness_3), _f(snap.coke_thickness_4),
-        _f(snap.coke_thickness_5), _f(snap.coke_thickness_6),
-        _f(snap.coke_thickness_7), _f(snap.coke_thickness_8),
-    ][:num_coils]
+    # Load per-coil data
+    coil_data, delta_hours = _coil_data_or_legacy(db, uid, snap, num_coils)
+    coking_factor = _get_coking_factor(db, tech, feed_type)
 
     # Try model-based prediction
     active_models = load_active_models(db)
@@ -353,32 +349,35 @@ def run_whatif(
     if model_key in active_models:
         model_dict = active_models[model_key]
         try:
-            # Baseline: predict from CURRENT X values (model-calculated)
+            # Baseline: predict from CURRENT per-coil X values
             baseline_pred = ModelBenchmark.predict_furnace(
                 model_dict=model_dict,
-                furnace_feed_rate=base_feed,
-                cot=base_cot,
-                shc=base_shc,
-                cop=_f(snap.cop),
-                cit=_f(snap.cit),
+                coil_data=coil_data,
                 feed_ethane_pct=eth_pct,
                 feed_propane_pct=prop_pct,
-                coil_thicknesses=coil_thicknesses,
-                num_coils=num_coils,
+                delta_hours=delta_hours,
+                coking_factor=coking_factor,
             )
+
+            # Build adjusted coil data with delta changes applied per-coil
+            feed_ratio = new_feed / base_feed if base_feed > 0 else 1.0
+            adjusted_coil_data = []
+            for cd in coil_data:
+                adjusted_coil_data.append({
+                    **cd,
+                    "feed": cd["feed"] * feed_ratio,
+                    "cot": cd["cot"] + delta_cot,
+                    "shc": cd["shc"] + delta_shc,
+                })
 
             # Predicted: with adjusted operating conditions
             new_pred = ModelBenchmark.predict_furnace(
                 model_dict=model_dict,
-                furnace_feed_rate=new_feed,
-                cot=new_cot,
-                shc=new_shc,
-                cop=_f(snap.cop),
-                cit=_f(snap.cit),
+                coil_data=adjusted_coil_data,
                 feed_ethane_pct=eth_pct,
                 feed_propane_pct=prop_pct,
-                coil_thicknesses=coil_thicknesses,
-                num_coils=num_coils,
+                delta_hours=delta_hours,
+                coking_factor=coking_factor,
             )
 
             # Model-predicted baseline and new values
