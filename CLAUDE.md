@@ -12,6 +12,21 @@ Full-stack web app for ethylene cracking furnace fleet optimization. Plant engin
 - Data fetching: TanStack React Query
 - Deployment: Docker Compose
 
+## Development Server Ports
+
+| Server | Port | Start Command |
+|--------|------|---------------|
+| Backend API | 8003 | `cd /d D:\furnace-ai\.claude\worktrees\confident-cray\backend && python -m uvicorn app.main:app --host 127.0.0.1 --port 8003 --reload` |
+| Frontend Dev | 5173 | `cd /d D:\furnace-ai\.claude\worktrees\confident-cray\frontend && npm run dev` |
+
+**Stop backend:** `netstat -ano | findstr :8003 | findstr LISTENING` → `for /f "tokens=5" %a in ('netstat -ano ^| findstr :8003 ^| findstr LISTENING') do taskkill /F /PID %a`
+
+Frontend API client (`frontend/src/api/client.ts`) is configured to call `http://localhost:8003`.
+
+CORS allowed origins (configured in `backend/app/main.py`): `localhost:5173`, `localhost:5174`, `localhost:4173`, `localhost:4174`, `localhost:3000`, `127.0.0.1:5173`, `127.0.0.1:5174`, `127.0.0.1:4173`.
+
+`.claude/launch.json` — configures backend (port 8000) and frontend (port 5173) for the Claude Code preview tool.
+
 ## Architecture
 No real-time historian connection. Two data flows:
 
@@ -58,7 +73,9 @@ furnace-ai/
 │   └── Dockerfile
 ├── init.sql                  # Database schema + seed data (includes coil_snapshot)
 ├── seed_data_reference.csv   # Reference CSV with per-coil data (64 rows)
-└── docker-compose.yml
+├── docker-compose.yml
+└── .claude/
+    └── launch.json           # Claude Code preview server config (backend:8000, frontend:5173)
 ```
 
 ## Fleet Configuration (8 Furnaces)
@@ -129,6 +146,8 @@ Secondary recycle absorbed by ↑COT (+1-2°C) on receiving furnaces.
 
 ### Phase 4: Economics
 Annual ethylene, propylene, feed cost, energy cost, decoke cost per furnace. Profit = revenue - costs. Sum across fleet.
+
+> **Bug Fix (commit 630026f):** Previously baseline economics used raw snapshot yield/propylene while optimized values applied composition adjustment, causing spurious non-zero ethylene/propylene/profit deltas for hold furnaces (AF-03, AF-07, AF-08) even when ΔCOT=ΔSHC=ΔFEED=0. Fix: both baseline and optimized now apply the same composition adjustment so the composition delta cancels out for unchanged furnaces.
 
 ## Iterative COT Optimization
 Iterates COT from -0.5 to -5.0°C in 0.5°C steps for each protected furnace (10×10 = 100 combinations for 2 protected). Full cross-feed model runs each combination. Maximum fleet profit selected.
